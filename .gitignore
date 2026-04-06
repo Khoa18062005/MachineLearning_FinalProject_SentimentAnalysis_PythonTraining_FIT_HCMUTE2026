@@ -1,0 +1,14 @@
+# Bỏ qua môi trường ảo
+.venv/
+venv/
+env/
+
+# Bỏ qua các file dữ liệu lớn
+data_training/*.csv
+data_training/*.zip
+
+# Bỏ qua file rác của hệ thống/IDE
+__pycache__/
+.DS_Store
+.idea/
+.vscode/
