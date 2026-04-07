@@ -1,7 +1,9 @@
 import pandas as pd
+import numpy as np
 import os
 import re
 from sklearn.model_selection import train_test_split
+from sklearn.metrics import accuracy_score
 from app.core.nlp_config import lemmatizer, CUSTOM_STOP_WORDS
 
 COLUMNS = ["target", "id", "date", "flag", "user", "text"]

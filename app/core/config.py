@@ -17,13 +17,13 @@ class Settings(BaseSettings):
     # Lấy thư mục gốc của dự án (FinalProject_ML_Backend_Python)
     BASE_DIR: str = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-    # Đường dẫn tới file dữ liệu 1.6 triệu dòng
+    # Đường dẫn tới file dữ liệu
     DATA_PATH: str = os.path.join(BASE_DIR, "data_training", "Data_Emotion.csv")
 
     # Nơi lưu trữ mô hình sau khi huấn luyện (Sẽ dùng ở các bước sau)
     MODEL_PATH: str = os.path.join(BASE_DIR, "app", "models", "sentiment_model.pkl")
 
-    # 5. Cấu hình Dữ liệu
+    # Cấu hình Dữ liệu
     CSV_COLUMNS: list = ["target", "id", "date", "flag", "user", "text"]
     CSV_ENCODING: str = "latin-1"
 
