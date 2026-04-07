@@ -23,11 +23,10 @@ async def get_dataset(set_name: str):
         "counts": result["counts"]  # Trả về cả số lượng mẫu để frontend hiển thị
     }
 
-
 @router.get("/clean-dataset/{set_name}")
 async def get_clean_dataset(set_name: str):
     # Gọi hàm lấy dữ liệu sạch
-    result = ml_service.get_clean_dataset_by_name(set_name=set_name, limit=100)
+    result = ml_service.get_clean_dataset_by_name(set_name=set_name, limit=200000)
 
     return {
         "status": "success",
