@@ -1,6 +1,8 @@
 from fastapi import APIRouter
+import os
 from app.services import ml_service, evaluation_service
-
+from app.core.config import settings
+from app.services.ml_service import get_clean_datasets_for_training
 router = APIRouter()
 
 @router.get("/preview-data")
@@ -39,36 +41,51 @@ async def get_clean_dataset(set_name: str):
 async def get_training_results():
     results = []
 
-    # Gọi hàm từ service mới
-    mnb_real_data = evaluation_service.get_mnb_real_performance()
+    # 1. Load dữ liệu validation MỘT LẦN cho TẤT CẢ các mô hình
+    _, df_val, _ = get_clean_datasets_for_training()
+    X_val = df_val['text'].fillna('')
+    y_val = df_val['target']
 
-    if mnb_real_data:
-        results.append(mnb_real_data)
-    else:
-        results.append({
-            "model_name": "Multinomial NB (Chưa có Model)",
-            "training_time_sec": 0,
-            "correct_predictions": 0,
-            "incorrect_predictions": 0,
-            "accuracy": 0
-        })
-
-    # Dữ liệu giả định cho SVM và XGBoost
-    results.extend([
+    # 2. Khai báo danh sách các models cần đánh giá
+    # Đặt tên file theo đúng format khi bạn lưu ở bước huấn luyện SVM, XGBoost
+    models_to_evaluate = [
         {
-            "model_name": "Support Vector Machine (SVM)",
-            "training_time_sec": 45.30,
-            "correct_predictions": 26100,
-            "incorrect_predictions": 3900,
-            "accuracy": 87.00
+            "name": "Multinomial Naive Bayes",
+            "model_path": settings.MODEL_PATH,
+            "vectorizer_path": settings.MODEL_PATH.replace('.pkl', '_vectorizer.pkl')
         },
         {
-            "model_name": "XGBoost",
-            "training_time_sec": 120.50,
-            "correct_predictions": 27000,
-            "incorrect_predictions": 3000,
-            "accuracy": 90.00
+            "name": "Support Vector Machine (SVM)",
+            "model_path": os.path.join(settings.BASE_DIR, "app", "models", "svm_model.pkl"),
+            "vectorizer_path": os.path.join(settings.BASE_DIR, "app", "models", "svm_vectorizer.pkl")
+        },
+        {
+            "name": "XGBoost",
+            "model_path": os.path.join(settings.BASE_DIR, "app", "models", "xgboost_model.pkl"),
+            "vectorizer_path": os.path.join(settings.BASE_DIR, "app", "models", "xgboost_vectorizer.pkl")
         }
-    ])
+    ]
+
+    # 3. Lặp qua cấu hình và dùng hàm đánh giá chung
+    for model_info in models_to_evaluate:
+        perf_data = evaluation_service.get_general_model_performance(
+            model_path=model_info["model_path"],
+            vectorizer_path=model_info["vectorizer_path"],
+            model_name=model_info["name"],
+            X_val=X_val,
+            y_val=y_val
+        )
+
+        if perf_data:
+            results.append(perf_data)
+        else:
+            # Xử lý fallback nếu mô hình chưa được train/chưa có file pkl
+            results.append({
+                "model_name": f"{model_info['name']} (Chưa huấn luyện)",
+                "training_time_sec": 0,
+                "correct_predictions": 0,
+                "incorrect_predictions": 0,
+                "accuracy": 0
+            })
 
     return {"status": "success", "data": results}
