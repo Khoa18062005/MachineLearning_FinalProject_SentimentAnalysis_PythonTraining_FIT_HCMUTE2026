@@ -2,11 +2,11 @@ import pandas as pd
 from nltk.lm import vocabulary
 import pickle
 import time
+import os
 from app.services.ml_service import get_clean_datasets_for_training
 from app.core.pandas_helper import setup_pandas_display
 from collections import defaultdict
 setup_pandas_display()
-
 
 def load_model(file_path):
     with open(file_path, 'rb') as f:
@@ -14,7 +14,8 @@ def load_model(file_path):
     return (model_data['probs_prior'],
             model_data['word_probs'],
             model_data['vocab'],
-            model_data['total_words_class'])
+            model_data['total_words_class'],
+            model_data.get('training_time_sec', 0.0))
 
 def get_vocabulary(X_train):
     vocab = set()
@@ -51,6 +52,7 @@ def calculate_word_probs(word_counts_class, total_words_class, vocabulary: list)
 
 # Hàm huấn luyện mô hình
 def train_MNB_Custom(X_train, y_train):
+    start_time = time.time()
     # 1. Tạo chuỗi không trùng lập
     vocab = get_vocabulary(X_train)
 
@@ -66,14 +68,20 @@ def train_MNB_Custom(X_train, y_train):
     # 4. Tính xác suất của từng đặc trưng P(wi|c)
     word_probs = calculate_word_probs(word_counts_class, total_words_class, vocab)
 
-    # 5. Lưu models
+    # Kết thúc bấm giờ
+    end_time = time.time()
+    training_duration = round(end_time - start_time, 2)
+
+    # Lưu models
     model_data = {
         'vocab': vocab,
         'probs_prior': probs_prior,
         'word_probs': word_probs,
-        'total_words_class': total_words_class
+        'total_words_class': total_words_class,
+        'training_time_sec': training_duration
     }
-    file_path = "MNB_model_custom.pkl"
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    file_path = os.path.join(current_dir, "MNB_model_custom.pkl")
     with open(file_path, 'wb') as f:
         pickle.dump(model_data, f)
     return model_data
@@ -116,11 +124,8 @@ if __name__ == "__main__":
     y_test = df_test['target']
 
     # Huấn luyện mô hình
-    start_time = time.time()
     model_metadata = train_MNB_Custom(X_train, y_train)
-    end_time = time.time()
-    time_training = round(end_time - start_time, 2)
-    print(f'- Thời gian huấn luyện mô hình: {time_training}')
 
     # Tải mô hình
-    priors, w_probs, vocab, totals = load_model("mnb_model_custom.pkl")
+    priors, w_probs, vocab, totals, train_time = load_model("MNB_model_custom.pkl")
+    print(f"Thời gian huấn luyện load từ file: {train_time} giây")
