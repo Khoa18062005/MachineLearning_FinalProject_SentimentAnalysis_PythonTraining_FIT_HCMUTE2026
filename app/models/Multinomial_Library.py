@@ -1,5 +1,5 @@
 import os
-import time  # Thêm thư viện time để đo thời gian
+import time
 import joblib
 import pandas as pd
 from sklearn.feature_extraction.text import TfidfVectorizer
