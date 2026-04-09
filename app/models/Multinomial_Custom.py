@@ -6,6 +6,7 @@ import os
 from app.services.ml_service import get_clean_datasets_for_training
 from app.core.pandas_helper import setup_pandas_display
 from collections import defaultdict
+from app.services.evaluation_service import save_confusion_matrix_chart
 setup_pandas_display()
 laplace_smoothing = 1
 def load_model(file_path):
@@ -161,4 +162,15 @@ if __name__ == "__main__":
 
     # Tải mô hình
     priors, w_probs, vocab, totals, counts, train_time = load_model("MNB_model_custom.pkl")
-    print(f"Thời gian huấn luyện load từ file: {train_time} giây")
+    print(f"- Thời gian huấn luyện load từ file: {train_time} giây")
+
+    # Dự đoán gía trị trên tập Test
+    print("- Đang tiến hành dự đoán giá trị trên tập Test")
+    y_pred = []
+    for text in X_test:
+        # Dự đoán nhãn cho từng dòng trong tập Test
+        label, _ = predict_MNB_Custom(text, priors, w_probs, vocab, totals)
+        y_pred.append(label)
+
+    # Lưu confushion matrix thành png
+    save_confusion_matrix_chart(y_test, y_pred, "mnb_custom")
