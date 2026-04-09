@@ -1,5 +1,8 @@
 from fastapi import APIRouter
 import os
+
+from starlette.responses import FileResponse
+
 from app.models.Multinomial_Custom import predict_MNB_Custom, load_model
 from app.services import ml_service, evaluation_service
 from app.core.config import settings
@@ -127,3 +130,24 @@ async def get_model_prediction_details(text: str):
     details = get_prediction_details(text, priors, w_probs, vocab, totals, counts)
 
     return {"status": "success", "data": details}
+
+
+@router.get("/charts/{model_type}")
+async def get_model_charts(model_type: str):
+    charts_map = {
+        "mnb": "laplace_smoothing_study.png",
+        "svm": "svm_kernel_study.png",
+        "xgb": "xgb_depth_study.png"
+    }
+
+    if model_type not in charts_map:
+        return {"status": "error", "message": "Loại biểu đồ không hợp lệ!"}
+
+    file_name = charts_map[model_type]
+    # Lấy đường dẫn tuyệt đối từ BASE_DIR
+    chart_path = os.path.join(settings.BASE_DIR, file_name)
+
+    if os.path.exists(chart_path):
+        return FileResponse(chart_path)
+
+    return {"status": "error", "message": f"File {file_name} không tồn tại tại {chart_path}"}
