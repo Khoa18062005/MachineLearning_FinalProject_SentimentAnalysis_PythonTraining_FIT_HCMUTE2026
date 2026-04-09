@@ -15,6 +15,7 @@ def load_model(file_path):
             model_data['word_probs'],
             model_data['vocab'],
             model_data['total_words_class'],
+            model_data['word_counts'],
             model_data.get('training_time_sec', 0.0))
 
 def get_vocabulary(X_train):
@@ -77,6 +78,7 @@ def train_MNB_Custom(X_train, y_train):
         'vocab': vocab,
         'probs_prior': probs_prior,
         'word_probs': word_probs,
+        'word_counts': word_counts_class,
         'total_words_class': total_words_class,
         'training_time_sec': training_duration
     }
@@ -110,8 +112,7 @@ def predict_MNB_Custom(text_input, probs_prior, word_probs, vocab, total_words_c
     prediction = max(results, key=results.get)
     return prediction, results
 
-
-def get_prediction_details(text_input, probs_prior, word_probs, vocab, total_words_class):
+def get_prediction_details(text_input, probs_prior, word_probs, vocab, total_words_class, word_counts):
     words = str(text_input).split()
     v_len = len(vocab)
     details = {}
@@ -126,27 +127,19 @@ def get_prediction_details(text_input, probs_prior, word_probs, vocab, total_wor
 
         current_score = probs_prior[c]
         for word in words:
-            # Tìm count(w_i, c) từ word_probs (ngược công thức: prob * (N+V) - 1)
-            # Hoặc tối ưu hơn là truyền thêm word_counts_class vào hàm này.
-            # Ở đây ta tính nhanh xác suất để demo:
+            # Lấy xác suất và số lần xuất hiện trực tiếp (không tính ngược nữa)
             prob = word_probs[c].get(word, 1 / (total_words_class[c] + v_len))
-
-            # Giả định lấy count từ xác suất (để hiển thị công thức count+1 / N+V)
-            # Lưu ý: count_w_c = int(round(prob * (total_words_class[c] + v_len) - 1))
-            count_w_c = 0  # Bạn có thể bổ sung word_counts_class nếu muốn chính xác tuyệt đối
-            if word in word_probs[c]:
-                # Đây là logic tính ngược để lấy count hiển thị lên UI
-                count_w_c = int(round(prob * (total_words_class[c] + v_len) - 1))
+            count_w_c = word_counts[c].get(word, 0) # Lấy 0 nếu từ chưa từng xuất hiện
 
             class_details["word_steps"].append({
                 "word": word,
-                "count_w_c": count_w_c,
+                "count_w_c": count_w_c, # Số liệu thực tế từ lúc train
                 "prob": prob
             })
             current_score *= prob
 
         class_details["final_score"] = current_score
-        details[c] = class_details
+        details[str(c)] = class_details # Đảm bảo key là string để JSON không lỗi
 
     return details
 
@@ -166,5 +159,5 @@ if __name__ == "__main__":
     model_metadata = train_MNB_Custom(X_train, y_train)
 
     # Tải mô hình
-    priors, w_probs, vocab, totals, train_time = load_model("MNB_model_custom.pkl")
+    priors, w_probs, vocab, totals, counts, train_time = load_model("MNB_model_custom.pkl")
     print(f"Thời gian huấn luyện load từ file: {train_time} giây")
