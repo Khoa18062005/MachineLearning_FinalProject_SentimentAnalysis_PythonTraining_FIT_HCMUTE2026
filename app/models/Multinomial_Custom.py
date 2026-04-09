@@ -6,8 +6,9 @@ import os
 from app.services.ml_service import get_clean_datasets_for_training
 from app.core.pandas_helper import setup_pandas_display
 from collections import defaultdict
+from app.services.evaluation_service import save_confusion_matrix_chart
 setup_pandas_display()
-
+laplace_smoothing = 1
 def load_model(file_path):
     with open(file_path, 'rb') as f:
         model_data = pickle.load(f)
@@ -15,6 +16,7 @@ def load_model(file_path):
             model_data['word_probs'],
             model_data['vocab'],
             model_data['total_words_class'],
+            model_data['word_counts'],
             model_data.get('training_time_sec', 0.0))
 
 def get_vocabulary(X_train):
@@ -46,7 +48,7 @@ def calculate_word_probs(word_counts_class, total_words_class, vocabulary: list)
         N_c = total_words_class[c]
         for word in vocabulary:
             count_w_c = word_counts_class[c][word]
-            prob = (count_w_c +1) / (N_c + v_len)
+            prob = (count_w_c + laplace_smoothing) / (N_c + v_len)
             word_probs[c][word] = prob
     return word_probs
 
@@ -77,6 +79,7 @@ def train_MNB_Custom(X_train, y_train):
         'vocab': vocab,
         'probs_prior': probs_prior,
         'word_probs': word_probs,
+        'word_counts': word_counts_class,
         'total_words_class': total_words_class,
         'training_time_sec': training_duration
     }
@@ -102,7 +105,7 @@ def predict_MNB_Custom(text_input, probs_prior, word_probs, vocab, total_words_c
                 score *= word_probs[c][word]
             else:
                 # Nếu từ mới (OOV): Tính xác suất mặc định theo Laplace
-                score *= 1 / (N_c + v_len)
+                score *= laplace_smoothing / (N_c + (laplace_smoothing * v_len))
 
         results[c] = score
 
@@ -110,6 +113,37 @@ def predict_MNB_Custom(text_input, probs_prior, word_probs, vocab, total_words_c
     prediction = max(results, key=results.get)
     return prediction, results
 
+def get_prediction_details(text_input, probs_prior, word_probs, vocab, total_words_class, word_counts):
+    words = str(text_input).split()
+    v_len = len(vocab)
+    details = {}
+
+    for c in probs_prior.keys():
+        class_details = {
+            "prior": probs_prior[c],
+            "total_words_in_class": total_words_class[c],
+            "vocab_size": v_len,
+            "word_steps": []
+        }
+
+        current_score = probs_prior[c]
+        for word in words:
+            # Lấy xác suất và số lần xuất hiện trực tiếp (không tính ngược nữa)
+            default_prob = laplace_smoothing / (total_words_class[c] + (laplace_smoothing * v_len))
+            prob = word_probs[c].get(word, default_prob)
+            count_w_c = word_counts[c].get(word, 0)
+
+            class_details["word_steps"].append({
+                "word": word,
+                "count_w_c": count_w_c, # Số liệu thực tế từ lúc train
+                "prob": prob
+            })
+            current_score *= prob
+
+        class_details["final_score"] = current_score
+        details[str(c)] = class_details # Đảm bảo key là string để JSON không lỗi
+
+    return details
 
 if __name__ == "__main__":
     # Lấy dữ liệu sạch từ ml_service.py
@@ -127,5 +161,16 @@ if __name__ == "__main__":
     model_metadata = train_MNB_Custom(X_train, y_train)
 
     # Tải mô hình
-    priors, w_probs, vocab, totals, train_time = load_model("MNB_model_custom.pkl")
-    print(f"Thời gian huấn luyện load từ file: {train_time} giây")
+    priors, w_probs, vocab, totals, counts, train_time = load_model("MNB_model_custom.pkl")
+    print(f"- Thời gian huấn luyện load từ file: {train_time} giây")
+
+    # Dự đoán gía trị trên tập Test
+    print("- Đang tiến hành dự đoán giá trị trên tập Test")
+    y_pred = []
+    for text in X_test:
+        # Dự đoán nhãn cho từng dòng trong tập Test
+        label, _ = predict_MNB_Custom(text, priors, w_probs, vocab, totals)
+        y_pred.append(label)
+
+    # Lưu confushion matrix thành png
+    save_confusion_matrix_chart(y_test, y_pred, "mnb_custom")
