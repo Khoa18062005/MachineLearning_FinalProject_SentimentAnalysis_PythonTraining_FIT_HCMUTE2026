@@ -8,7 +8,8 @@ from app.models.Multinomial_Library import load_library_model
 from app.services import ml_service, evaluation_service
 from app.core.config import settings
 from app.services.evaluation_service import calculate_performance_metrics
-from app.services.ml_service import get_clean_datasets_for_training
+from app.services.ml_service import get_clean_datasets_for_training, clean_text
+
 router = APIRouter()
 PREDICTION_CACHE = {}
 @router.get("/preview-data")
@@ -232,3 +233,64 @@ async def get_model_charts(model_type: str):
         return FileResponse(chart_path)
 
     return {"status": "error", "message": f"Biểu đồ {model_type} chưa được tạo!"}
+
+@router.get("/predict-text")
+async def predict_new_text(text: str):
+    # 1. Tiền xử lý văn bản (yêu cầu của bạn)
+    cleaned_text = clean_text(text)
+
+    # Khởi tạo dictionary chứa kết quả. (-1 nghĩa là chưa có mô hình)
+    custom_preds = {"mnb": -1, "svm": -1, "xgb": -1}
+    lib_preds = {"mnb": -1, "svm": -1, "xgb": -1}
+
+    # --- 2A. Nhóm Custom ---
+    try:
+        model_path = os.path.join(settings.BASE_DIR, "app", "models", "MNB_model_custom.pkl")
+        if os.path.exists(model_path):
+            priors, w_probs, vocab, totals, counts, _ = load_model(model_path)
+            label, _ = predict_MNB_Custom(cleaned_text, priors, w_probs, vocab, totals)
+            custom_preds["mnb"] = label
+    except Exception as e:
+        pass
+
+    # --- 2B. Nhóm Library ---
+    try:
+        from app.models.Multinomial_Library import load_library_model
+        lib_pipeline, _ = load_library_model()
+        if lib_pipeline:
+            # predict() của sklearn yêu cầu đầu vào là mảng 1 chiều
+            label = int(lib_pipeline.predict([cleaned_text])[0])
+            lib_preds["mnb"] = label
+    except Exception as e:
+        pass
+
+    # (Sau này bạn code SVM và XGBoost xong thì bổ sung logic gọi mô hình vào đây)
+
+    # --- 3. Cơ chế BỎ PHIẾU (Majority Vote) ---
+    def get_vote(preds_dict):
+        # Chỉ lấy các phiếu hợp lệ (khác -1)
+        valid_preds = [v for v in preds_dict.values() if v != -1]
+        if not valid_preds: return -1 # Chưa có mô hình nào chạy
+        # Lấy nhãn xuất hiện nhiều nhất
+        return max(set(valid_preds), key=valid_preds.count)
+
+    custom_vote = get_vote(custom_preds)
+    lib_vote = get_vote(lib_preds)
+
+    # Kết quả chung cuộc: Tạm thời lấy ý kiến của nhóm Library làm mỏ neo
+    final_vote = lib_vote if lib_vote != -1 else custom_vote
+
+    return {
+        "status": "success",
+        "data": {
+            "raw_text": text,
+            "cleaned_text": cleaned_text,
+            "custom": custom_preds,
+            "library": lib_preds,
+            "votes": {
+                "custom": custom_vote,
+                "library": lib_vote,
+                "final": final_vote
+            }
+        }
+    }
