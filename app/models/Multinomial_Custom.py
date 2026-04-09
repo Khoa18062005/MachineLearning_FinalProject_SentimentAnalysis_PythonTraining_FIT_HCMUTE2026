@@ -7,7 +7,7 @@ from app.services.ml_service import get_clean_datasets_for_training
 from app.core.pandas_helper import setup_pandas_display
 from collections import defaultdict
 setup_pandas_display()
-
+laplace_smoothing = 1
 def load_model(file_path):
     with open(file_path, 'rb') as f:
         model_data = pickle.load(f)
@@ -47,7 +47,7 @@ def calculate_word_probs(word_counts_class, total_words_class, vocabulary: list)
         N_c = total_words_class[c]
         for word in vocabulary:
             count_w_c = word_counts_class[c][word]
-            prob = (count_w_c +1) / (N_c + v_len)
+            prob = (count_w_c + laplace_smoothing) / (N_c + v_len)
             word_probs[c][word] = prob
     return word_probs
 
@@ -104,7 +104,7 @@ def predict_MNB_Custom(text_input, probs_prior, word_probs, vocab, total_words_c
                 score *= word_probs[c][word]
             else:
                 # Nếu từ mới (OOV): Tính xác suất mặc định theo Laplace
-                score *= 1 / (N_c + v_len)
+                score *= laplace_smoothing / (N_c + (laplace_smoothing * v_len))
 
         results[c] = score
 
@@ -128,8 +128,9 @@ def get_prediction_details(text_input, probs_prior, word_probs, vocab, total_wor
         current_score = probs_prior[c]
         for word in words:
             # Lấy xác suất và số lần xuất hiện trực tiếp (không tính ngược nữa)
-            prob = word_probs[c].get(word, 1 / (total_words_class[c] + v_len))
-            count_w_c = word_counts[c].get(word, 0) # Lấy 0 nếu từ chưa từng xuất hiện
+            default_prob = laplace_smoothing / (total_words_class[c] + (laplace_smoothing * v_len))
+            prob = word_probs[c].get(word, default_prob)
+            count_w_c = word_counts[c].get(word, 0)
 
             class_details["word_steps"].append({
                 "word": word,
