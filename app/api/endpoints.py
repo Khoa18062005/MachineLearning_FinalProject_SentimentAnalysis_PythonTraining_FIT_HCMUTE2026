@@ -4,6 +4,7 @@ import os
 from starlette.responses import FileResponse
 
 from app.models.Multinomial_Custom import predict_MNB_Custom, load_model
+from app.models.Multinomial_Library import load_library_model
 from app.services import ml_service, evaluation_service
 from app.core.config import settings
 from app.services.evaluation_service import calculate_performance_metrics
@@ -78,8 +79,70 @@ async def get_training_results():
             "accuracy": 0
         })
 
+    lib_pipeline, lib_time = load_library_model()
+    lib_key = "MNB_Library"
+
+    if lib_pipeline:
+        if lib_key in PREDICTION_CACHE:
+            y_pred_lib = PREDICTION_CACHE[lib_key]
+        else:
+            y_pred_lib = lib_pipeline.predict(X_test)
+            PREDICTION_CACHE[lib_key] = y_pred_lib
+
+        lib_metrics = calculate_performance_metrics(
+            model_name="Multinomial Naive Bayes (Library)",
+            y_true=y_test,
+            y_pred=y_pred_lib,
+            training_time_sec=lib_time
+        )
+        results.append(lib_metrics)
+    else:
+        # THÊM NHÁNH NÀY ĐỂ FRONTEND KHÔNG BỊ LỖI KHI CHƯA TRAIN
+        results.append({
+            "model_name": "Multinomial NB Library (Chưa huấn luyện)",
+            "training_time_sec": 0,
+            "correct_predictions": 0,
+            "incorrect_predictions": 0,
+            "accuracy": 0
+        })
+
     return {"status": "success", "data": results}
 
+
+# @router.get("/model-errors")
+# async def get_model_errors(model_name: str):
+#     _, _, df_test = get_clean_datasets_for_training()
+#     X_test = df_test['text'].fillna('')
+#
+#     y_pred = []
+#
+#     # Xử lý mô hình Multinomial Naive Bayes (Custom)
+#     if model_name == "Multinomial Naive Bayes (Custom)":
+#         model_key = "MNB_Custom"
+#
+#         # ĐỌC TỪ CACHE: Cực kỳ nhanh!
+#         if model_key in PREDICTION_CACHE:
+#             y_pred = PREDICTION_CACHE[model_key]
+#         else:
+#             # Fallback (Phòng hờ): Lỡ server bị restart mất cache thì mới phải tính lại
+#             model_path = os.path.join(settings.BASE_DIR, "app", "models", "MNB_model_custom.pkl")
+#             priors, w_probs, vocab, totals, counts, _ = load_model(model_path)
+#             for text in X_test:
+#                 label, _ = predict_MNB_Custom(text, priors, w_probs, vocab, totals)
+#                 y_pred.append(label)
+#             PREDICTION_CACHE[model_key] = y_pred
+#
+#     #=========================================
+#     # ... (Mấy ông viết tiếp phần xử lý mô hình tương tự ở đây nhé) ...
+#
+#     #=========================================
+#
+#     df_result = df_test.copy()
+#     df_result['predicted'] = y_pred
+#     df_errors = df_result[df_result['target'] != df_result['predicted']]
+#     result_data = df_errors[['target', 'predicted', 'text']].to_dict(orient="records")
+#
+#     return {"status": "success", "data": result_data}
 
 @router.get("/model-errors")
 async def get_model_errors(model_name: str):
@@ -88,15 +151,13 @@ async def get_model_errors(model_name: str):
 
     y_pred = []
 
-    # Xử lý mô hình Multinomial Naive Bayes (Custom)
+    # --- 1. Xử lý mô hình Multinomial Naive Bayes (Custom) ---
     if model_name == "Multinomial Naive Bayes (Custom)":
         model_key = "MNB_Custom"
 
-        # ĐỌC TỪ CACHE: Cực kỳ nhanh!
         if model_key in PREDICTION_CACHE:
             y_pred = PREDICTION_CACHE[model_key]
         else:
-            # Fallback (Phòng hờ): Lỡ server bị restart mất cache thì mới phải tính lại
             model_path = os.path.join(settings.BASE_DIR, "app", "models", "MNB_model_custom.pkl")
             priors, w_probs, vocab, totals, counts, _ = load_model(model_path)
             for text in X_test:
@@ -104,18 +165,36 @@ async def get_model_errors(model_name: str):
                 y_pred.append(label)
             PREDICTION_CACHE[model_key] = y_pred
 
-    #=========================================
-    # ... (Mấy ông viết tiếp phần xử lý mô hình tương tự ở đây nhé) ...
+    # --- 2. Xử lý mô hình Multinomial Naive Bayes (Library) [MỚI BỔ SUNG] ---
+    elif model_name == "Multinomial Naive Bayes (Library)":
+        model_key = "MNB_Library"
+
+        # Lấy từ Cache cho nhanh (nếu trước đó đã bấm "Kết quả Huấn luyện")
+        if model_key in PREDICTION_CACHE:
+            y_pred = PREDICTION_CACHE[model_key]
+        else:
+            # Fallback: Tính lại nếu server vừa khởi động lại mà chưa có cache
+            from app.models.Multinomial_Library import load_library_model
+            lib_pipeline, _ = load_library_model()
+            if lib_pipeline:
+                y_pred = lib_pipeline.predict(X_test)
+                PREDICTION_CACHE[model_key] = y_pred
 
     #=========================================
+    # Để sẵn chỗ sau này làm cho SVM và XGBoost
+    #=========================================
 
+    # Tránh lỗi nếu tên mô hình gửi lên không khớp với bất kỳ if/elif nào
+    if len(y_pred) == 0:
+        return {"status": "success", "data": []}
+
+    # Gom dữ liệu và lọc ra các câu dự đoán sai
     df_result = df_test.copy()
     df_result['predicted'] = y_pred
     df_errors = df_result[df_result['target'] != df_result['predicted']]
     result_data = df_errors[['target', 'predicted', 'text']].to_dict(orient="records")
 
     return {"status": "success", "data": result_data}
-
 
 @router.get("/model-details")
 async def get_model_prediction_details(text: str):
