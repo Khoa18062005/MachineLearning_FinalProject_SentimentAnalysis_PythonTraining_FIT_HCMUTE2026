@@ -36,7 +36,7 @@ def save_confusion_matrix_chart(y_true, y_pred, model_name_id):
     cm = confusion_matrix(y_true, y_pred, labels=labels)
 
     # 2. Vẽ biểu đồ bằng Seaborn
-    plt.figure(figsize=(8, 6))
+    plt.figure(figsize=(12, 6))
     sns.heatmap(cm, annot=True, fmt='d', cmap='Blues',
                 xticklabels=['Tiêu cực (0)', 'Tích cực (4)'],
                 yticklabels=['Tiêu cực (0)', 'Tích cực (4)'])
