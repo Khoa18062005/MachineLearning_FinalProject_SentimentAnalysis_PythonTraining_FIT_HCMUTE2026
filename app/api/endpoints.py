@@ -343,43 +343,82 @@ async def get_model_charts(model_type: str):
 
     return {"status": "error", "message": f"Biểu đồ {model_type} chưa được tạo!"}
 
+
 @router.get("/predict-text")
 async def predict_new_text(text: str):
-    # 1. Tiền xử lý văn bản (yêu cầu của bạn)
+    # 1. Tiền xử lý văn bản
     cleaned_text = clean_text(text)
 
     # Khởi tạo dictionary chứa kết quả. (-1 nghĩa là chưa có mô hình)
     custom_preds = {"mnb": -1, "svm": -1, "xgb": -1}
     lib_preds = {"mnb": -1, "svm": -1, "xgb": -1}
 
-    # --- 2A. Nhóm Custom ---
+    # ==========================================
+    # 2A. NHÓM CUSTOM
+    # ==========================================
+
+    # --- 1. MNB Custom ---
     try:
-        model_path = os.path.join(settings.BASE_DIR, "app", "models", "MNB_model_custom.pkl")
-        if os.path.exists(model_path):
-            priors, w_probs, vocab, totals, counts, _ = load_model(model_path)
+        mnb_custom_path = os.path.join(settings.BASE_DIR, "app", "models", "MNB_model_custom.pkl")
+        if os.path.exists(mnb_custom_path):
+            priors, w_probs, vocab, totals, counts, _ = load_model(mnb_custom_path)
             label, _ = predict_MNB_Custom(cleaned_text, priors, w_probs, vocab, totals)
             custom_preds["mnb"] = label
     except Exception as e:
-        pass
+        print(f"Lỗi MNB Custom: {e}")
 
-    # --- 2B. Nhóm Library ---
+    # --- 2. SVM Full-Sample Custom ---
+    try:
+        svm_full_path = os.path.join(settings.BASE_DIR, "app", "models", "svm_full_sample_custom.pkl")
+        if os.path.exists(svm_full_path):
+            svm_full_model, svm_full_vectorizer = load_svm_full_model(svm_full_path)
+            # Vector hóa văn bản đầu vào (.toarray() vì custom build dùng dense matrix)
+            X_input_tfidf = svm_full_vectorizer.transform([cleaned_text]).toarray()
+            # Dự đoán (trả về 1 hoặc -1)
+            y_pred_svm = svm_full_model.predict(X_input_tfidf)
+            # Map lại nhãn: 1 -> 4 (Tích cực), -1 -> 0 (Tiêu cực)
+            label = int(np.where(y_pred_svm == 1, 4, 0)[0])
+            custom_preds["svm"] = label
+    except Exception as e:
+        print(f"Lỗi SVM Custom: {e}")
+
+    # ==========================================
+    # 2B. NHÓM LIBRARY
+    # ==========================================
+
+    # --- 1. MNB Library ---
     try:
         from app.models.Multinomial_Library import load_library_model
         lib_pipeline, _ = load_library_model()
         if lib_pipeline:
-            # predict() của sklearn yêu cầu đầu vào là mảng 1 chiều
             label = int(lib_pipeline.predict([cleaned_text])[0])
             lib_preds["mnb"] = label
     except Exception as e:
-        pass
+        print(f"Lỗi MNB Library: {e}")
 
-    # (Sau này bạn code SVM và XGBoost xong thì bổ sung logic gọi mô hình vào đây)
+    # --- 2. SVM Library ---
+    try:
+        svm_lib_model_path = os.path.join(settings.BASE_DIR, "app", "models", "svm_library_model.pkl")
+        svm_lib_vectorizer_path = os.path.join(settings.BASE_DIR, "app", "models", "svm_library_vectorizer.pkl")
 
-    # --- 3. Cơ chế BỎ PHIẾU (Majority Vote) ---
+        if os.path.exists(svm_lib_model_path) and os.path.exists(svm_lib_vectorizer_path):
+            svm_lib_model = joblib.load(svm_lib_model_path)
+            svm_lib_vectorizer = joblib.load(svm_lib_vectorizer_path)
+
+            # Transform không cần toarray() vì sklearn LinearSVC tối ưu tốt cho ma trận thưa (sparse)
+            X_input_tfidf = svm_lib_vectorizer.transform([cleaned_text])
+            label = int(svm_lib_model.predict(X_input_tfidf)[0])
+            lib_preds["svm"] = label
+    except Exception as e:
+        print(f"Lỗi SVM Library: {e}")
+
+    # ==========================================
+    # 3. CƠ CHẾ BỎ PHIẾU (Majority Vote)
+    # ==========================================
     def get_vote(preds_dict):
         # Chỉ lấy các phiếu hợp lệ (khác -1)
         valid_preds = [v for v in preds_dict.values() if v != -1]
-        if not valid_preds: return -1 # Chưa có mô hình nào chạy
+        if not valid_preds: return -1  # Chưa có mô hình nào chạy
         # Lấy nhãn xuất hiện nhiều nhất
         return max(set(valid_preds), key=valid_preds.count)
 
