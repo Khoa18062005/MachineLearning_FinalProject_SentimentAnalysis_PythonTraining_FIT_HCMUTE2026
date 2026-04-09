@@ -5,6 +5,10 @@ from app.services import ml_service, evaluation_service
 from app.core.config import settings
 from app.services.evaluation_service import calculate_performance_metrics
 from app.services.ml_service import get_clean_datasets_for_training
+from app.models.SVM_OneSample_Custom import load_model as load_svm_one_model, encode_target_for_svm
+from app.models.SVM_FullSample_Custom import load_model as load_svm_full_model
+import joblib
+import numpy as np
 router = APIRouter()
 PREDICTION_CACHE = {}
 @router.get("/preview-data")
@@ -41,14 +45,15 @@ async def get_training_results():
     X_test = df_test['text'].fillna('')
     y_test = df_test['target']
 
-    # --- ĐÁNH GIÁ MÔ HÌNH MNB CUSTOM ---
+    # =========================
+    # 1) MNB CUSTOM
+    # =========================
     model_path = os.path.join(settings.BASE_DIR, "app", "models", "MNB_model_custom.pkl")
-    model_key = "MNB_Custom" # Đặt một cái tên khóa cho Cache
+    model_key = "MNB_Custom"
 
     if os.path.exists(model_path):
         priors, w_probs, vocab, totals, train_time = load_model(model_path)
 
-        # KIỂM TRA CACHE: Nếu đã có thì lấy ra, nếu chưa thì mới chạy dự đoán
         if model_key in PREDICTION_CACHE:
             y_pred = PREDICTION_CACHE[model_key]
         else:
@@ -56,7 +61,6 @@ async def get_training_results():
             for text in X_test:
                 label, _ = predict_MNB_Custom(text, priors, w_probs, vocab, totals)
                 y_pred.append(label)
-            # Tính xong thì LƯU VÀO CACHE cho lần sau dùng
             PREDICTION_CACHE[model_key] = y_pred
 
         mnb_metrics = calculate_performance_metrics(
@@ -66,14 +70,82 @@ async def get_training_results():
             training_time_sec=train_time
         )
         results.append(mnb_metrics)
-    else:
-        results.append({
-            "model_name": "Multinomial Naive Bayes (Chưa huấn luyện)",
-            "training_time_sec": 0,
-            "correct_predictions": 0,
-            "incorrect_predictions": 0,
-            "accuracy": 0
-        })
+
+    # =========================
+    # 2) SVM ONE-SAMPLE CUSTOM
+    # =========================
+    svm_one_path = os.path.join(settings.BASE_DIR, "app", "models", "svm_one_sample_custom.pkl")
+    svm_one_key = "SVM_OneSample_Custom"
+
+    if os.path.exists(svm_one_path):
+        svm_one_model, svm_one_vectorizer = load_svm_one_model(svm_one_path)
+
+        if svm_one_key in PREDICTION_CACHE:
+            y_pred = PREDICTION_CACHE[svm_one_key]
+        else:
+            X_test_tfidf = svm_one_vectorizer.transform(X_test).toarray()
+            y_pred_svm = svm_one_model.predict(X_test_tfidf)
+            y_pred = np.where(y_pred_svm == 1, 4, 0).tolist()
+            PREDICTION_CACHE[svm_one_key] = y_pred
+
+        svm_one_metrics = calculate_performance_metrics(
+            model_name="Linear SVM (One-Sample Custom)",
+            y_true=y_test,
+            y_pred=y_pred,
+            training_time_sec=svm_one_model.training_time_sec
+        )
+        results.append(svm_one_metrics)
+
+    # =========================
+    # 3) SVM FULL-SAMPLE CUSTOM
+    # =========================
+    svm_full_path = os.path.join(settings.BASE_DIR, "app", "models", "svm_full_sample_custom.pkl")
+    svm_full_key = "SVM_FullSample_Custom"
+
+    if os.path.exists(svm_full_path):
+        svm_full_model, svm_full_vectorizer = load_svm_full_model(svm_full_path)
+
+        if svm_full_key in PREDICTION_CACHE:
+            y_pred = PREDICTION_CACHE[svm_full_key]
+        else:
+            X_test_tfidf = svm_full_vectorizer.transform(X_test).toarray()
+            y_pred_svm = svm_full_model.predict(X_test_tfidf)
+            y_pred = np.where(y_pred_svm == 1, 4, 0).tolist()
+            PREDICTION_CACHE[svm_full_key] = y_pred
+
+        svm_full_metrics = calculate_performance_metrics(
+            model_name="Linear SVM (Full-Sample Custom)",
+            y_true=y_test,
+            y_pred=y_pred,
+            training_time_sec=svm_full_model.training_time_sec
+        )
+        results.append(svm_full_metrics)
+
+    # =========================
+    # 4) SVM LIBRARY
+    # =========================
+    svm_lib_model_path = os.path.join(settings.BASE_DIR, "app", "models", "svm_library_model.pkl")
+    svm_lib_vectorizer_path = os.path.join(settings.BASE_DIR, "app", "models", "svm_library_vectorizer.pkl")
+    svm_lib_key = "SVM_Library"
+
+    if os.path.exists(svm_lib_model_path) and os.path.exists(svm_lib_vectorizer_path):
+        svm_lib_model = joblib.load(svm_lib_model_path)
+        svm_lib_vectorizer = joblib.load(svm_lib_vectorizer_path)
+
+        if svm_lib_key in PREDICTION_CACHE:
+            y_pred = PREDICTION_CACHE[svm_lib_key]
+        else:
+            X_test_tfidf = svm_lib_vectorizer.transform(X_test)
+            y_pred = svm_lib_model.predict(X_test_tfidf).tolist()
+            PREDICTION_CACHE[svm_lib_key] = y_pred
+
+        svm_lib_metrics = calculate_performance_metrics(
+            model_name="Linear SVM (Library)",
+            y_true=y_test,
+            y_pred=y_pred,
+            training_time_sec=getattr(svm_lib_model, "training_time_sec", 0.0)
+        )
+        results.append(svm_lib_metrics)
 
     return {"status": "success", "data": results}
 
@@ -85,15 +157,12 @@ async def get_model_errors(model_name: str):
 
     y_pred = []
 
-    # Xử lý mô hình Multinomial Naive Bayes (Custom)
     if model_name == "Multinomial Naive Bayes (Custom)":
         model_key = "MNB_Custom"
 
-        # ĐỌC TỪ CACHE: Cực kỳ nhanh!
         if model_key in PREDICTION_CACHE:
             y_pred = PREDICTION_CACHE[model_key]
         else:
-            # Fallback (Phòng hờ): Lỡ server bị restart mất cache thì mới phải tính lại
             model_path = os.path.join(settings.BASE_DIR, "app", "models", "MNB_model_custom.pkl")
             priors, w_probs, vocab, totals, _ = load_model(model_path)
             for text in X_test:
@@ -101,10 +170,46 @@ async def get_model_errors(model_name: str):
                 y_pred.append(label)
             PREDICTION_CACHE[model_key] = y_pred
 
-    #=========================================
-    # ... (Mấy ông viết tiếp phần xử lý mô hình tương tự ở đây nhé) ...
+    elif model_name == "Linear SVM (One-Sample Custom)":
+        model_key = "SVM_OneSample_Custom"
 
-    #=========================================
+        if model_key in PREDICTION_CACHE:
+            y_pred = PREDICTION_CACHE[model_key]
+        else:
+            svm_one_path = os.path.join(settings.BASE_DIR, "app", "models", "svm_one_sample_custom.pkl")
+            svm_one_model, svm_one_vectorizer = load_svm_one_model(svm_one_path)
+            X_test_tfidf = svm_one_vectorizer.transform(X_test).toarray()
+            y_pred_svm = svm_one_model.predict(X_test_tfidf)
+            y_pred = np.where(y_pred_svm == 1, 4, 0).tolist()
+            PREDICTION_CACHE[model_key] = y_pred
+
+    elif model_name == "Linear SVM (Full-Sample Custom)":
+        model_key = "SVM_FullSample_Custom"
+
+        if model_key in PREDICTION_CACHE:
+            y_pred = PREDICTION_CACHE[model_key]
+        else:
+            svm_full_path = os.path.join(settings.BASE_DIR, "app", "models", "svm_full_sample_custom.pkl")
+            svm_full_model, svm_full_vectorizer = load_svm_full_model(svm_full_path)
+            X_test_tfidf = svm_full_vectorizer.transform(X_test).toarray()
+            y_pred_svm = svm_full_model.predict(X_test_tfidf)
+            y_pred = np.where(y_pred_svm == 1, 4, 0).tolist()
+            PREDICTION_CACHE[model_key] = y_pred
+
+    elif model_name == "Linear SVM (Library)":
+        model_key = "SVM_Library"
+
+        if model_key in PREDICTION_CACHE:
+            y_pred = PREDICTION_CACHE[model_key]
+        else:
+            svm_lib_model_path = os.path.join(settings.BASE_DIR, "app", "models", "svm_library_model.pkl")
+            svm_lib_vectorizer_path = os.path.join(settings.BASE_DIR, "app", "models", "svm_library_vectorizer.pkl")
+            svm_lib_model = joblib.load(svm_lib_model_path)
+            svm_lib_vectorizer = joblib.load(svm_lib_vectorizer_path)
+
+            X_test_tfidf = svm_lib_vectorizer.transform(X_test)
+            y_pred = svm_lib_model.predict(X_test_tfidf).tolist()
+            PREDICTION_CACHE[model_key] = y_pred
 
     df_result = df_test.copy()
     df_result['predicted'] = y_pred
