@@ -5,6 +5,7 @@ from sklearn.feature_extraction.text import CountVectorizer
 from sklearn.naive_bayes import MultinomialNB
 from sklearn.pipeline import Pipeline
 from app.core.config import settings
+from app.services.evaluation_service import save_confusion_matrix_chart
 from app.services.ml_service import get_clean_datasets_for_training
 
 
@@ -52,3 +53,10 @@ if __name__ == "__main__":
     X_test = df_test['text']
     y_test = df_test['target']
     model_metadata = train_MNB_Library(X_train, y_train)
+    lib_pipeline, lib_time = load_library_model()
+
+    print("- Đang tiến hành dự đoán giá trị trên tập Test")
+    y_pred = lib_pipeline.predict(X_test)
+    print("- Đang tạo và lưu biểu đồ Confusion Matrix")
+    save_confusion_matrix_chart(y_test, y_pred, "mnb_library")
+

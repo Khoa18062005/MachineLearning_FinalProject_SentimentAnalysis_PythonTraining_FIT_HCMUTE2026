@@ -213,20 +213,22 @@ async def get_model_prediction_details(text: str):
 
 @router.get("/charts/{model_type}")
 async def get_model_charts(model_type: str):
+    # Cập nhật danh sách map ảnh cho khớp với Frontend
     charts_map = {
-        "mnb": "laplace_smoothing_study.png",
-        "svm": "svm_kernel_study.png",
-        "xgb": "xgb_depth_study.png"
+        "mnb": "laplace_smoothing_study.png",     # Dành cho Tab Trực quan tham số
+        "mnb_custom_cm": "cm_mnb_custom.png",       # CM của model Custom
+        "mnb_library_cm": "cm_mnb_library.png",     # CM của model Library
+        "svm_cm": "cm_svm.png",
+        "xgb_cm": "cm_xgb.png"
     }
 
     if model_type not in charts_map:
         return {"status": "error", "message": "Loại biểu đồ không hợp lệ!"}
 
     file_name = charts_map[model_type]
-    # Lấy đường dẫn tuyệt đối từ BASE_DIR
     chart_path = os.path.join(settings.BASE_DIR, file_name)
 
     if os.path.exists(chart_path):
         return FileResponse(chart_path)
 
-    return {"status": "error", "message": f"File {file_name} không tồn tại tại {chart_path}"}
+    return {"status": "error", "message": f"Biểu đồ {model_type} chưa được tạo!"}
