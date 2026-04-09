@@ -112,3 +112,18 @@ async def get_model_errors(model_name: str):
     result_data = df_errors[['target', 'predicted', 'text']].to_dict(orient="records")
 
     return {"status": "success", "data": result_data}
+
+
+@router.get("/model-details")
+async def get_model_prediction_details(text: str):
+    model_path = os.path.join(settings.BASE_DIR, "app", "models", "MNB_model_custom.pkl")
+    if not os.path.exists(model_path):
+        return {"status": "error", "message": "Model not found"}
+
+    priors, w_probs, vocab, totals, _ = load_model(model_path)
+
+    # Import hàm vừa viết ở bước 1
+    from app.models.Multinomial_Custom import get_prediction_details
+    details = get_prediction_details(text, priors, w_probs, vocab, totals)
+
+    return {"status": "success", "data": details}
