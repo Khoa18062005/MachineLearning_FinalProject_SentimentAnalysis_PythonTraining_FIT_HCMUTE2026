@@ -46,7 +46,7 @@ async def get_training_results():
     model_key = "MNB_Custom" # Đặt một cái tên khóa cho Cache
 
     if os.path.exists(model_path):
-        priors, w_probs, vocab, totals, train_time = load_model(model_path)
+        priors, w_probs, vocab, totals, counts, train_time = load_model(model_path)
 
         # KIỂM TRA CACHE: Nếu đã có thì lấy ra, nếu chưa thì mới chạy dự đoán
         if model_key in PREDICTION_CACHE:
@@ -95,7 +95,7 @@ async def get_model_errors(model_name: str):
         else:
             # Fallback (Phòng hờ): Lỡ server bị restart mất cache thì mới phải tính lại
             model_path = os.path.join(settings.BASE_DIR, "app", "models", "MNB_model_custom.pkl")
-            priors, w_probs, vocab, totals, _ = load_model(model_path)
+            priors, w_probs, vocab, totals, counts, _ = load_model(model_path)
             for text in X_test:
                 label, _ = predict_MNB_Custom(text, priors, w_probs, vocab, totals)
                 y_pred.append(label)
@@ -120,10 +120,10 @@ async def get_model_prediction_details(text: str):
     if not os.path.exists(model_path):
         return {"status": "error", "message": "Model not found"}
 
-    priors, w_probs, vocab, totals, _ = load_model(model_path)
+    priors, w_probs, vocab, totals, counts, _ = load_model(model_path)
 
     # Import hàm vừa viết ở bước 1
     from app.models.Multinomial_Custom import get_prediction_details
-    details = get_prediction_details(text, priors, w_probs, vocab, totals)
+    details = get_prediction_details(text, priors, w_probs, vocab, totals, counts)
 
     return {"status": "success", "data": details}
