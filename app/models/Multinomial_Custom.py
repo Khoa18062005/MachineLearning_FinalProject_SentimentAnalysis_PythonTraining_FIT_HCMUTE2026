@@ -111,6 +111,45 @@ def predict_MNB_Custom(text_input, probs_prior, word_probs, vocab, total_words_c
     return prediction, results
 
 
+def get_prediction_details(text_input, probs_prior, word_probs, vocab, total_words_class):
+    words = str(text_input).split()
+    v_len = len(vocab)
+    details = {}
+
+    for c in probs_prior.keys():
+        class_details = {
+            "prior": probs_prior[c],
+            "total_words_in_class": total_words_class[c],
+            "vocab_size": v_len,
+            "word_steps": []
+        }
+
+        current_score = probs_prior[c]
+        for word in words:
+            # Tìm count(w_i, c) từ word_probs (ngược công thức: prob * (N+V) - 1)
+            # Hoặc tối ưu hơn là truyền thêm word_counts_class vào hàm này.
+            # Ở đây ta tính nhanh xác suất để demo:
+            prob = word_probs[c].get(word, 1 / (total_words_class[c] + v_len))
+
+            # Giả định lấy count từ xác suất (để hiển thị công thức count+1 / N+V)
+            # Lưu ý: count_w_c = int(round(prob * (total_words_class[c] + v_len) - 1))
+            count_w_c = 0  # Bạn có thể bổ sung word_counts_class nếu muốn chính xác tuyệt đối
+            if word in word_probs[c]:
+                # Đây là logic tính ngược để lấy count hiển thị lên UI
+                count_w_c = int(round(prob * (total_words_class[c] + v_len) - 1))
+
+            class_details["word_steps"].append({
+                "word": word,
+                "count_w_c": count_w_c,
+                "prob": prob
+            })
+            current_score *= prob
+
+        class_details["final_score"] = current_score
+        details[c] = class_details
+
+    return details
+
 if __name__ == "__main__":
     # Lấy dữ liệu sạch từ ml_service.py
     df_train, df_val, df_test = get_clean_datasets_for_training()
