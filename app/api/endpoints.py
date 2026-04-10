@@ -4,14 +4,22 @@ import joblib
 import numpy as np
 
 from typing import Any
+from sklearn.pipeline import FeatureUnion
 from starlette.responses import FileResponse
 
 from app.core.config import settings
 from app.services import ml_service
-from app.services.evaluation_service import calculate_performance_metrics
+from app.services.evaluation_service import (
+    calculate_performance_metrics,
+    save_confusion_matrix_chart,
+)
 from app.services.ml_service import get_clean_datasets_for_training, clean_text
 
-from app.models.Multinomial_Custom import predict_MNB_Custom, load_model as load_mnb_custom_model
+from app.models.Multinomial_Custom import (
+    predict_MNB_Custom,
+    load_model as load_mnb_custom_model,
+    get_prediction_details as get_mnb_custom_prediction_details,
+)
 from app.models.Multinomial_Library import load_library_model
 
 from app.models.SVM_OneSample_Custom import load_model as load_svm_one_model
@@ -79,10 +87,6 @@ def _ensure_int_labels(y_pred):
     return [int(x) for x in y_pred]
 
 
-def _binary01_to_04(y_pred_binary):
-    return [4 if int(v) == 1 else 0 for v in y_pred_binary]
-
-
 def _predict_mnb_custom_batch(X_texts):
     model_path = os.path.join(settings.BASE_DIR, "app", "models", "MNB_model_custom.pkl")
     if not os.path.exists(model_path):
@@ -96,17 +100,35 @@ def _predict_mnb_custom_batch(X_texts):
     return y_pred
 
 
-def _predict_svm_custom_dense_in_batches(model, vectorizer, X_texts, batch_size=256):
-    y_pred_all = []
+def _predict_mnb_library_batch(X_texts):
+    lib_pipeline, _ = load_library_model()
+    if not lib_pipeline:
+        return []
 
-    total = len(X_texts)
-    for start in range(0, total, batch_size):
-        batch_texts = X_texts.iloc[start:start + batch_size]
-        X_batch = vectorizer.transform(batch_texts).astype(np.float32).toarray()
-        y_batch = model.predict(X_batch)
-        y_pred_all.extend(_binary01_to_04(y_batch))
+    y_pred = lib_pipeline.predict(X_texts).tolist()
+    return _ensure_int_labels(y_pred)
 
-    return y_pred_all
+
+def _predict_svm_project_labels(model, vectorizer, X_texts):
+    """
+    Dự đoán cho SVM custom:
+    - Giữ nguyên sparse matrix, KHÔNG .toarray()
+    - Output project labels: 0 / 4
+    """
+    X_tfidf = vectorizer.transform(X_texts)
+    y_pred_svm = model.predict(X_tfidf)
+    return np.where(y_pred_svm == 1, 4, 0).tolist()
+
+
+def _predict_single_svm_project_label(model, vectorizer, text):
+    """
+    Dự đoán 1 câu cho SVM custom:
+    - Giữ sparse
+    - Output project label: 0 / 4
+    """
+    X_tfidf = vectorizer.transform([text])
+    y_pred_svm = model.predict(X_tfidf)
+    return int(np.where(y_pred_svm == 1, 4, 0)[0])
 
 
 def _predict_svm_one_custom_batch(X_texts):
@@ -115,11 +137,10 @@ def _predict_svm_one_custom_batch(X_texts):
         return []
 
     svm_one_model, svm_one_vectorizer = load_svm_one_model(svm_one_path)
-    return _predict_svm_custom_dense_in_batches(
+    return _predict_svm_project_labels(
         model=svm_one_model,
         vectorizer=svm_one_vectorizer,
         X_texts=X_texts,
-        batch_size=256,
     )
 
 
@@ -129,11 +150,10 @@ def _predict_svm_full_custom_batch(X_texts):
         return []
 
     svm_full_model, svm_full_vectorizer = load_svm_full_model(svm_full_path)
-    return _predict_svm_custom_dense_in_batches(
+    return _predict_svm_project_labels(
         model=svm_full_model,
         vectorizer=svm_full_vectorizer,
         X_texts=X_texts,
-        batch_size=128,
     )
 
 
@@ -148,15 +168,6 @@ def _predict_svm_library_batch(X_texts):
     svm_lib_vectorizer = joblib.load(svm_lib_vectorizer_path)
     X_test_tfidf = svm_lib_vectorizer.transform(X_texts)
     y_pred = svm_lib_model.predict(X_test_tfidf).tolist()
-    return _ensure_int_labels(y_pred)
-
-
-def _predict_mnb_library_batch(X_texts):
-    lib_pipeline, _ = load_library_model()
-    if not lib_pipeline:
-        return []
-
-    y_pred = lib_pipeline.predict(X_texts).tolist()
     return _ensure_int_labels(y_pred)
 
 
@@ -229,25 +240,6 @@ def _predict_xgb_library_batch(X_texts):
     return y_pred
 
 
-def _single_predict_svm_custom(cleaned_text: str):
-    svm_full_path = os.path.join(settings.BASE_DIR, "app", "models", "svm_full_sample_custom.pkl")
-    svm_one_path = os.path.join(settings.BASE_DIR, "app", "models", "svm_one_sample_custom.pkl")
-
-    if os.path.exists(svm_full_path):
-        svm_full_model, svm_full_vectorizer = load_svm_full_model(svm_full_path)
-        X_input_tfidf = svm_full_vectorizer.transform([cleaned_text]).astype(np.float32).toarray()
-        y_pred_svm = svm_full_model.predict(X_input_tfidf)
-        return int(4 if int(y_pred_svm[0]) == 1 else 0)
-
-    if os.path.exists(svm_one_path):
-        svm_one_model, svm_one_vectorizer = load_svm_one_model(svm_one_path)
-        X_input_tfidf = svm_one_vectorizer.transform([cleaned_text]).astype(np.float32).toarray()
-        y_pred_svm = svm_one_model.predict(X_input_tfidf)
-        return int(4 if int(y_pred_svm[0]) == 1 else 0)
-
-    return -1
-
-
 def _append_placeholder(results, model_name):
     results.append({
         "model_name": model_name,
@@ -273,15 +265,348 @@ def _get_chart_candidates(model_type: str):
         "mnb": ["laplace_smoothing_study.png"],
         "mnb_custom_cm": ["cm_mnb_custom.png"],
         "mnb_library_cm": ["cm_mnb_library.png"],
-        "svm_cm": ["cm_svm.png"],
-        "svm_custom_cm": ["cm_svm.png"],
-        "xgb_cm": ["cm_xgb.png", "cm_xgb_custom.png"],
+        "svm_one_custom_cm": ["cm_svm_one_custom.png"],
+        "svm_full_custom_cm": ["cm_svm_full_custom.png"],
+        "svm_library_cm": ["cm_svm_library.png"],
+        "svm_cm": ["cm_svm_library.png", "cm_svm_full_custom.png", "cm_svm_one_custom.png", "cm_svm.png"],
+        "svm_custom_cm": ["cm_svm_full_custom.png", "cm_svm_one_custom.png", "cm_svm.png"],
         "xgb_custom_cm": ["cm_xgb_custom.png", "cm_xgb.png"],
         "xgb_library_cm": ["cm_xgb_library.png", "cm_xgb.png"],
-        "svm": ["svm_study.png"],
-        "xgb": ["xgb_study.png"],
+        "xgb_cm": ["cm_xgb_library.png", "cm_xgb_custom.png", "cm_xgb.png"],
+        "svm": ["svm_study.png", "cm_svm_library.png"],
+        "xgb": ["xgb_study.png", "cm_xgb_library.png"],
     }
     return charts_map.get(model_type, [])
+
+
+def _safe_sigmoid(x):
+    x = float(np.clip(x, -50, 50))
+    return 1.0 / (1.0 + np.exp(-x))
+
+
+def _softmax(scores):
+    scores = np.array(scores, dtype=float)
+    scores = scores - np.max(scores)
+    exp_scores = np.exp(scores)
+    total = np.sum(exp_scores)
+    if total == 0:
+        return np.ones_like(exp_scores) / len(exp_scores)
+    return exp_scores / total
+
+
+def _get_vectorizer_feature_names(vectorizer):
+    """
+    Hỗ trợ cả:
+    - TfidfVectorizer / CountVectorizer
+    - FeatureUnion(word + char)
+    """
+    if hasattr(vectorizer, "get_feature_names_out"):
+        return list(vectorizer.get_feature_names_out())
+
+    if isinstance(vectorizer, FeatureUnion) or hasattr(vectorizer, "transformer_list"):
+        feature_names = []
+        for transformer_name, transformer in vectorizer.transformer_list:
+            if hasattr(transformer, "get_feature_names_out"):
+                child_names = transformer.get_feature_names_out()
+                child_names = [f"{transformer_name}:{name}" for name in child_names]
+                feature_names.extend(child_names)
+        return feature_names
+
+    return []
+
+
+def _build_linear_svm_detail_payload(model_name, text, actual_target, predicted_target, model, vectorizer, source="custom"):
+    """
+    Giải thích tuyến tính cho:
+    - SVM One-Sample Custom
+    - SVM Full-Sample Custom
+    - SVM Library
+    """
+    X_vec = vectorizer.transform([text])
+
+    if source == "library":
+        weights = model.coef_.ravel()
+        bias = float(model.intercept_[0]) if hasattr(model, "intercept_") else 0.0
+        raw_score = float(model.decision_function(X_vec)[0])
+    else:
+        weights = model.w
+        bias = float(model.b)
+        raw_score = float(model.decision_function(X_vec)[0])
+
+    feature_names = _get_vectorizer_feature_names(vectorizer)
+
+    rows = []
+    if hasattr(X_vec, "indices"):
+        for idx, tfidf_value in zip(X_vec.indices, X_vec.data):
+            feature_name = feature_names[idx] if idx < len(feature_names) else f"feature_{idx}"
+            weight = float(weights[idx])
+            contribution = float(tfidf_value * weight)
+
+            if contribution > 0:
+                direction = "Tích cực (đẩy về label 4)"
+            elif contribution < 0:
+                direction = "Tiêu cực (đẩy về label 0)"
+            else:
+                direction = "Trung tính"
+
+            rows.append({
+                "feature": feature_name,
+                "tfidf": float(tfidf_value),
+                "weight": weight,
+                "contribution": contribution,
+                "direction": direction
+            })
+
+    rows = sorted(rows, key=lambda x: abs(x["contribution"]), reverse=True)
+
+    prob_pos = _safe_sigmoid(raw_score)
+    prob_neg = 1.0 - prob_pos
+
+    return {
+        "detail_type": "svm_linear",
+        "model_name": model_name,
+        "raw_text": text,
+        "actual_target": actual_target,
+        "predicted_target": predicted_target,
+        "decision_score": raw_score,
+        "bias": bias,
+        "pseudo_prob_neg": prob_neg,
+        "pseudo_prob_pos": prob_pos,
+        "active_features_count": len(rows),
+        "feature_steps": rows[:40]
+    }
+
+
+def _build_mnb_library_detail_payload(model_name, text, actual_target, predicted_target):
+    lib_pipeline, _ = load_library_model()
+    if not lib_pipeline:
+        return {
+            "detail_type": "unsupported",
+            "model_name": model_name,
+            "message": "Chưa tìm thấy model Multinomial Naive Bayes Library."
+        }
+
+    vectorizer = lib_pipeline.named_steps["vectorizer"]
+    nb_model = lib_pipeline.named_steps["nb"]
+
+    X_counts = vectorizer.transform([text])
+    feature_names = vectorizer.get_feature_names_out()
+    classes = nb_model.classes_
+
+    class_log_priors = nb_model.class_log_prior_
+    feature_log_prob = nb_model.feature_log_prob_
+
+    raw_log_scores = []
+    detail_by_class = {}
+
+    active_rows = []
+    if hasattr(X_counts, "indices"):
+        for idx, count in zip(X_counts.indices, X_counts.data):
+            active_rows.append((idx, int(count)))
+
+    for class_idx, class_value in enumerate(classes):
+        class_rows = []
+        total_log_score = float(class_log_priors[class_idx])
+
+        for idx, count in active_rows:
+            token = feature_names[idx]
+            log_prob = float(feature_log_prob[class_idx, idx])
+            prob = float(np.exp(log_prob))
+            step_log_score = float(count * log_prob)
+            total_log_score += step_log_score
+
+            class_rows.append({
+                "word": token,
+                "count": count,
+                "log_prob": log_prob,
+                "prob": prob,
+                "step_log_score": step_log_score
+            })
+
+        raw_log_scores.append(total_log_score)
+        detail_by_class[str(class_value)] = {
+            "prior": float(np.exp(class_log_priors[class_idx])),
+            "log_prior": float(class_log_priors[class_idx]),
+            "word_steps": class_rows,
+            "final_log_score": total_log_score
+        }
+
+    normalized_probs = _softmax(raw_log_scores)
+    for idx, class_value in enumerate(classes):
+        detail_by_class[str(class_value)]["normalized_prob"] = float(normalized_probs[idx])
+
+    return {
+        "detail_type": "mnb_library",
+        "model_name": model_name,
+        "raw_text": text,
+        "actual_target": actual_target,
+        "predicted_target": predicted_target,
+        "classes": detail_by_class
+    }
+
+
+def _build_xgb_generic_detail_payload(model_name, text, actual_target, predicted_target, model_type):
+    """
+    Fallback cho XGBoost:
+    - Nếu không có hàm detail riêng thì vẫn trả ra payload đủ để modal không bị hỏng
+    """
+    if model_type == "custom":
+        try:
+            from app.models import XGBoost_Custom as xgb_custom_module
+
+            detail_fn = getattr(xgb_custom_module, "get_prediction_details_XGB_Custom", None)
+            if detail_fn is not None:
+                xgb_model_path = os.path.join(settings.BASE_DIR, "app", "models", "XGB_model_custom.pkl")
+                xgb_vectorizer_path = os.path.join(settings.BASE_DIR, "app", "models", "XGB_vectorizer.pkl")
+
+                if os.path.exists(xgb_model_path) and os.path.exists(xgb_vectorizer_path):
+                    (
+                        base_score_logit,
+                        trees,
+                        learning_rate,
+                        feature_names,
+                        classes,
+                        threshold,
+                        train_time,
+                        params,
+                    ) = load_xgb_model(xgb_model_path)
+
+                    vectorizer = load_xgb_vectorizer(xgb_vectorizer_path)
+
+                    model_data = {
+                        "base_score_logit": base_score_logit,
+                        "trees": trees,
+                        "learning_rate": learning_rate,
+                        "feature_names": feature_names,
+                        "classes": classes,
+                        "threshold": threshold,
+                        "training_time_sec": train_time,
+                        "params": params,
+                    }
+
+                    details = detail_fn(
+                        text_input=text,
+                        model_data=model_data,
+                        vectorizer=vectorizer,
+                    )
+                    if isinstance(details, dict):
+                        details = make_json_safe(details)
+                        details["model_type"] = "xgb_custom"
+                        details["detail_type"] = details.get("detail_type", "xgb_custom")
+                        return details
+        except Exception as e:
+            print(f"[xgb-custom-detail] fallback lỗi: {e}")
+
+        return {
+            "detail_type": "unsupported",
+            "model_name": model_name,
+            "message": "XGBoost Custom hiện chưa hỗ trợ bóc chi tiết từng bước trong file bạn gửi."
+        }
+
+    if model_type == "library":
+        try:
+            from app.models import XGBoost_Library as xgb_library_module
+
+            detail_fn = getattr(xgb_library_module, "get_prediction_details_XGB_Library", None)
+            if detail_fn is not None:
+                xgb_lib_model_path = os.path.join(settings.BASE_DIR, "app", "models", "XGB_model_library.pkl")
+                xgb_lib_vectorizer_path = os.path.join(settings.BASE_DIR, "app", "models", "XGB_vectorizer_library.pkl")
+
+                if os.path.exists(xgb_lib_model_path) and os.path.exists(xgb_lib_vectorizer_path):
+                    (
+                        model,
+                        feature_names,
+                        classes,
+                        threshold,
+                        train_time,
+                        params,
+                    ) = load_xgb_library_model(xgb_lib_model_path)
+
+                    vectorizer = load_xgb_library_vectorizer(xgb_lib_vectorizer_path)
+
+                    model_data = {
+                        "model": model,
+                        "feature_names": feature_names,
+                        "classes": classes,
+                        "threshold": threshold,
+                        "training_time_sec": train_time,
+                        "params": params,
+                        "best_params": params.get("best_params") if isinstance(params, dict) else None,
+                        "best_score_cv": params.get("best_score_cv") if isinstance(params, dict) else None,
+                    }
+
+                    details = detail_fn(
+                        text_input=text,
+                        model_data=model_data,
+                        vectorizer=vectorizer,
+                    )
+                    if isinstance(details, dict):
+                        details = make_json_safe(details)
+                        details["model_type"] = "xgb_library"
+                        details["detail_type"] = details.get("detail_type", "xgb_library")
+                        return details
+        except Exception as e:
+            print(f"[xgb-library-detail] fallback lỗi: {e}")
+
+        xgb_lib_model_path = os.path.join(settings.BASE_DIR, "app", "models", "XGB_model_library.pkl")
+        xgb_lib_vectorizer_path = os.path.join(settings.BASE_DIR, "app", "models", "XGB_vectorizer_library.pkl")
+
+        if not (os.path.exists(xgb_lib_model_path) and os.path.exists(xgb_lib_vectorizer_path)):
+            return {
+                "detail_type": "unsupported",
+                "model_name": model_name,
+                "message": "Chưa tìm thấy model XGBoost Library."
+            }
+
+        model, _feature_names, classes, threshold, _train_time, _params = load_xgb_library_model(xgb_lib_model_path)
+        vectorizer = load_xgb_library_vectorizer(xgb_lib_vectorizer_path)
+
+        X_vec = vectorizer.transform([text])
+
+        prob_neg = None
+        prob_pos = None
+        if hasattr(model, "predict_proba"):
+            probs = model.predict_proba(X_vec)[0]
+            if len(probs) >= 2:
+                prob_neg = float(probs[0])
+                prob_pos = float(probs[1])
+
+        feature_names = _get_vectorizer_feature_names(vectorizer)
+        feature_importances = getattr(model, "feature_importances_", None)
+
+        rows = []
+        if hasattr(X_vec, "indices"):
+            for idx, val in zip(X_vec.indices, X_vec.data):
+                feature_name = feature_names[idx] if idx < len(feature_names) else f"feature_{idx}"
+                importance = float(feature_importances[idx]) if feature_importances is not None and idx < len(feature_importances) else 0.0
+                proxy_contribution = float(val * importance)
+
+                rows.append({
+                    "feature": feature_name,
+                    "value": float(val),
+                    "importance": importance,
+                    "proxy_contribution": proxy_contribution
+                })
+
+        rows = sorted(rows, key=lambda x: abs(x["proxy_contribution"]), reverse=True)
+
+        return {
+            "detail_type": "xgb_generic",
+            "model_name": model_name,
+            "raw_text": text,
+            "actual_target": actual_target,
+            "predicted_target": predicted_target,
+            "note": "Đây là phân tích gần đúng theo đặc trưng kích hoạt và feature importance, chưa phải giải thích chi tiết từng nhánh cây.",
+            "prob_neg": prob_neg,
+            "prob_pos": prob_pos,
+            "feature_steps": rows[:40]
+        }
+
+    return {
+        "detail_type": "unsupported",
+        "model_name": model_name,
+        "message": "Model XGBoost không được hỗ trợ."
+    }
 
 
 # =========================================================
@@ -337,6 +662,8 @@ async def get_training_results():
                     y_pred.append(int(label))
                 PREDICTION_CACHE[model_key] = y_pred
 
+            save_confusion_matrix_chart(y_test, y_pred, "mnb_custom")
+
             results.append(_safe_metrics(
                 model_name="Multinomial Naive Bayes (Custom)",
                 y_true=y_test,
@@ -353,14 +680,16 @@ async def get_training_results():
     try:
         svm_one_path = os.path.join(settings.BASE_DIR, "app", "models", "svm_one_sample_custom.pkl")
         if os.path.exists(svm_one_path):
-            svm_one_model, _svm_one_vectorizer = load_svm_one_model(svm_one_path)
+            svm_one_model, svm_one_vectorizer = load_svm_one_model(svm_one_path)
             model_key = "SVM_OneSample_Custom"
 
             if model_key in PREDICTION_CACHE:
                 y_pred = PREDICTION_CACHE[model_key]
             else:
-                y_pred = _predict_svm_one_custom_batch(X_test)
+                y_pred = _predict_svm_project_labels(svm_one_model, svm_one_vectorizer, X_test)
                 PREDICTION_CACHE[model_key] = y_pred
+
+            save_confusion_matrix_chart(y_test, y_pred, "svm_one_custom")
 
             results.append(_safe_metrics(
                 model_name="Linear SVM (One-Sample Custom)",
@@ -378,14 +707,16 @@ async def get_training_results():
     try:
         svm_full_path = os.path.join(settings.BASE_DIR, "app", "models", "svm_full_sample_custom.pkl")
         if os.path.exists(svm_full_path):
-            svm_full_model, _svm_full_vectorizer = load_svm_full_model(svm_full_path)
+            svm_full_model, svm_full_vectorizer = load_svm_full_model(svm_full_path)
             model_key = "SVM_FullSample_Custom"
 
             if model_key in PREDICTION_CACHE:
                 y_pred = PREDICTION_CACHE[model_key]
             else:
-                y_pred = _predict_svm_full_custom_batch(X_test)
+                y_pred = _predict_svm_project_labels(svm_full_model, svm_full_vectorizer, X_test)
                 PREDICTION_CACHE[model_key] = y_pred
+
+            save_confusion_matrix_chart(y_test, y_pred, "svm_full_custom")
 
             results.append(_safe_metrics(
                 model_name="Linear SVM (Full-Sample Custom)",
@@ -413,6 +744,8 @@ async def get_training_results():
                 y_pred = _predict_svm_library_batch(X_test)
                 PREDICTION_CACHE[model_key] = y_pred
 
+            save_confusion_matrix_chart(y_test, y_pred, "svm_library")
+
             results.append(_safe_metrics(
                 model_name="Linear SVM (Library)",
                 y_true=y_test,
@@ -436,6 +769,8 @@ async def get_training_results():
             else:
                 y_pred = _predict_mnb_library_batch(X_test)
                 PREDICTION_CACHE[model_key] = y_pred
+
+            save_confusion_matrix_chart(y_test, y_pred, "mnb_library")
 
             results.append(_safe_metrics(
                 model_name="Multinomial Naive Bayes (Library)",
@@ -473,6 +808,8 @@ async def get_training_results():
                 y_pred = _predict_xgb_custom_batch(X_test)
                 PREDICTION_CACHE[model_key] = y_pred
 
+            save_confusion_matrix_chart(y_test, y_pred, "xgb_custom")
+
             results.append(_safe_metrics(
                 model_name="XGBoost (Custom)",
                 y_true=y_test,
@@ -506,6 +843,8 @@ async def get_training_results():
             else:
                 y_pred = _predict_xgb_library_batch(X_test)
                 PREDICTION_CACHE[model_key] = y_pred
+
+            save_confusion_matrix_chart(y_test, y_pred, "xgb_library")
 
             results.append(_safe_metrics(
                 model_name="XGBoost (Library)",
@@ -615,163 +954,148 @@ async def get_model_errors(model_name: str):
 # MODEL DETAILS
 # =========================================================
 @router.get("/model-details")
-async def get_model_prediction_details(text: str, model_name: str = "Multinomial Naive Bayes (Custom)"):
-    try:
-        # =====================================================
-        # MNB CUSTOM
-        # =====================================================
-        if model_name == "Multinomial Naive Bayes (Custom)":
-            model_path = os.path.join(settings.BASE_DIR, "app", "models", "MNB_model_custom.pkl")
-            if not os.path.exists(model_path):
-                return {"status": "error", "message": "MNB Custom model not found."}
+async def get_model_prediction_details(
+    model_name: str,
+    text: str,
+    target: int | None = None,
+    predicted: int | None = None,
+):
+    actual_target = int(target) if target is not None else None
+    predicted_target = int(predicted) if predicted is not None else None
 
-            priors, w_probs, vocab, totals, counts, _ = load_mnb_custom_model(model_path)
-            from app.models.Multinomial_Custom import get_prediction_details
+    # =========================
+    # MNB CUSTOM
+    # =========================
+    if model_name == "Multinomial Naive Bayes (Custom)":
+        model_path = os.path.join(settings.BASE_DIR, "app", "models", "MNB_model_custom.pkl")
+        if not os.path.exists(model_path):
+            return {"status": "error", "message": "Model not found"}
 
-            details = get_prediction_details(text, priors, w_probs, vocab, totals, counts)
-            details = make_json_safe(details)
-            details["model_type"] = "mnb_custom"
-            details["input_text"] = text
+        priors, w_probs, vocab, totals, counts, _ = load_mnb_custom_model(model_path)
+        details = get_mnb_custom_prediction_details(text, priors, w_probs, vocab, totals, counts)
 
-            return {"status": "success", "data": details}
-
-        # =====================================================
-        # XGBOOST CUSTOM
-        # =====================================================
-        elif model_name == "XGBoost (Custom)":
-            from app.models import XGBoost_Custom as xgb_custom_module
-
-            detail_fn = getattr(xgb_custom_module, "get_prediction_details_XGB_Custom", None)
-            if detail_fn is None:
-                return {
-                    "status": "error",
-                    "message": "File XGBoost_Custom.py chưa có hàm get_prediction_details_XGB_Custom."
-                }
-
-            xgb_model_path = os.path.join(settings.BASE_DIR, "app", "models", "XGB_model_custom.pkl")
-            xgb_vectorizer_path = os.path.join(settings.BASE_DIR, "app", "models", "XGB_vectorizer.pkl")
-
-            if not (os.path.exists(xgb_model_path) and os.path.exists(xgb_vectorizer_path)):
-                return {
-                    "status": "error",
-                    "message": "XGBoost Custom model/vectorizer not found."
-                }
-
-            (
-                base_score_logit,
-                trees,
-                learning_rate,
-                feature_names,
-                classes,
-                threshold,
-                train_time,
-                params,
-            ) = load_xgb_model(xgb_model_path)
-
-            vectorizer = load_xgb_vectorizer(xgb_vectorizer_path)
-
-            model_data = {
-                "base_score_logit": base_score_logit,
-                "trees": trees,
-                "learning_rate": learning_rate,
-                "feature_names": feature_names,
-                "classes": classes,
-                "threshold": threshold,
-                "training_time_sec": train_time,
-                "params": params,
-            }
-
-            details = detail_fn(
-                text_input=text,
-                model_data=model_data,
-                vectorizer=vectorizer,
-            )
-
-            details = make_json_safe(details)
-            details["model_type"] = "xgb_custom"
-            return {"status": "success", "data": details}
-
-        # =====================================================
-        # XGBOOST LIBRARY
-        # =====================================================
-        elif model_name == "XGBoost (Library)":
-            from app.models import XGBoost_Library as xgb_library_module
-
-            detail_fn = getattr(xgb_library_module, "get_prediction_details_XGB_Library", None)
-            if detail_fn is None:
-                return {
-                    "status": "error",
-                    "message": "File XGBoost_Library.py chưa có hàm get_prediction_details_XGB_Library."
-                }
-
-            xgb_lib_model_path = os.path.join(settings.BASE_DIR, "app", "models", "XGB_model_library.pkl")
-            xgb_lib_vectorizer_path = os.path.join(settings.BASE_DIR, "app", "models", "XGB_vectorizer_library.pkl")
-
-            if not (os.path.exists(xgb_lib_model_path) and os.path.exists(xgb_lib_vectorizer_path)):
-                return {
-                    "status": "error",
-                    "message": "XGBoost Library model/vectorizer not found."
-                }
-
-            (
-                model,
-                feature_names,
-                classes,
-                threshold,
-                train_time,
-                params,
-            ) = load_xgb_library_model(xgb_lib_model_path)
-
-            vectorizer = load_xgb_library_vectorizer(xgb_lib_vectorizer_path)
-
-            model_data = {
-                "model": model,
-                "feature_names": feature_names,
-                "classes": classes,
-                "threshold": threshold,
-                "training_time_sec": train_time,
-                "params": params,
-                "best_params": params.get("best_params") if isinstance(params, dict) else None,
-                "best_score_cv": params.get("best_score_cv") if isinstance(params, dict) else None,
-            }
-
-            details = detail_fn(
-                text_input=text,
-                model_data=model_data,
-                vectorizer=vectorizer,
-            )
-
-            details = make_json_safe(details)
-            details["model_type"] = "xgb_library"
-            return {"status": "success", "data": details}
-
-        # =====================================================
-        # SVM / MNB LIBRARY
-        # =====================================================
-        elif "SVM" in model_name:
-            return {
-                "status": "error",
-                "message": f"Model '{model_name}' hiện chưa hỗ trợ giao diện giải thích chi tiết."
-            }
-
-        elif model_name == "Multinomial Naive Bayes (Library)":
-            return {
-                "status": "error",
-                "message": "MNB Library hiện chưa có hàm giải thích chi tiết riêng trong giao diện này."
-            }
-
-        else:
-            return {
-                "status": "error",
-                "message": f"Model '{model_name}' không được hỗ trợ."
-            }
-
-    except Exception as e:
-        print(f"[model-details] Lỗi với model '{model_name}': {e}")
         return {
-            "status": "error",
-            "message": f"Không thể lấy chi tiết dự đoán cho model '{model_name}'."
+            "status": "success",
+            "data": make_json_safe({
+                "detail_type": "mnb_custom",
+                "model_name": model_name,
+                "raw_text": text,
+                "actual_target": actual_target,
+                "predicted_target": predicted_target,
+                "classes": details
+            })
         }
+
+    # =========================
+    # MNB LIBRARY
+    # =========================
+    if model_name == "Multinomial Naive Bayes (Library)":
+        payload = _build_mnb_library_detail_payload(
+            model_name=model_name,
+            text=text,
+            actual_target=actual_target,
+            predicted_target=predicted_target
+        )
+        return {"status": "success", "data": make_json_safe(payload)}
+
+    # =========================
+    # SVM ONE-SAMPLE CUSTOM
+    # =========================
+    if model_name == "Linear SVM (One-Sample Custom)":
+        svm_one_path = os.path.join(settings.BASE_DIR, "app", "models", "svm_one_sample_custom.pkl")
+        if not os.path.exists(svm_one_path):
+            return {"status": "error", "message": "Model not found"}
+
+        svm_one_model, svm_one_vectorizer = load_svm_one_model(svm_one_path)
+        payload = _build_linear_svm_detail_payload(
+            model_name=model_name,
+            text=text,
+            actual_target=actual_target,
+            predicted_target=predicted_target,
+            model=svm_one_model,
+            vectorizer=svm_one_vectorizer,
+            source="custom"
+        )
+        return {"status": "success", "data": make_json_safe(payload)}
+
+    # =========================
+    # SVM FULL-SAMPLE CUSTOM
+    # =========================
+    if model_name == "Linear SVM (Full-Sample Custom)":
+        svm_full_path = os.path.join(settings.BASE_DIR, "app", "models", "svm_full_sample_custom.pkl")
+        if not os.path.exists(svm_full_path):
+            return {"status": "error", "message": "Model not found"}
+
+        svm_full_model, svm_full_vectorizer = load_svm_full_model(svm_full_path)
+        payload = _build_linear_svm_detail_payload(
+            model_name=model_name,
+            text=text,
+            actual_target=actual_target,
+            predicted_target=predicted_target,
+            model=svm_full_model,
+            vectorizer=svm_full_vectorizer,
+            source="custom"
+        )
+        return {"status": "success", "data": make_json_safe(payload)}
+
+    # =========================
+    # SVM LIBRARY
+    # =========================
+    if model_name == "Linear SVM (Library)":
+        svm_lib_model_path = os.path.join(settings.BASE_DIR, "app", "models", "svm_library_model.pkl")
+        svm_lib_vectorizer_path = os.path.join(settings.BASE_DIR, "app", "models", "svm_library_vectorizer.pkl")
+
+        if not (os.path.exists(svm_lib_model_path) and os.path.exists(svm_lib_vectorizer_path)):
+            return {"status": "error", "message": "Model not found"}
+
+        svm_lib_model = joblib.load(svm_lib_model_path)
+        svm_lib_vectorizer = joblib.load(svm_lib_vectorizer_path)
+
+        payload = _build_linear_svm_detail_payload(
+            model_name=model_name,
+            text=text,
+            actual_target=actual_target,
+            predicted_target=predicted_target,
+            model=svm_lib_model,
+            vectorizer=svm_lib_vectorizer,
+            source="library"
+        )
+        return {"status": "success", "data": make_json_safe(payload)}
+
+    # =========================
+    # XGB CUSTOM
+    # =========================
+    if model_name == "XGBoost (Custom)":
+        payload = _build_xgb_generic_detail_payload(
+            model_name=model_name,
+            text=text,
+            actual_target=actual_target,
+            predicted_target=predicted_target,
+            model_type="custom"
+        )
+        return {"status": "success", "data": make_json_safe(payload)}
+
+    # =========================
+    # XGB LIBRARY
+    # =========================
+    if model_name == "XGBoost (Library)":
+        payload = _build_xgb_generic_detail_payload(
+            model_name=model_name,
+            text=text,
+            actual_target=actual_target,
+            predicted_target=predicted_target,
+            model_type="library"
+        )
+        return {"status": "success", "data": make_json_safe(payload)}
+
+    return {
+        "status": "success",
+        "data": {
+            "detail_type": "unsupported",
+            "model_name": model_name,
+            "message": f"Chưa hỗ trợ chi tiết cho model '{model_name}'."
+        }
+    }
 
 
 # =========================================================
@@ -814,7 +1138,18 @@ async def predict_new_text(text: str):
 
     # CUSTOM - SVM
     try:
-        custom_preds["svm"] = _single_predict_svm_custom(cleaned_text)
+        svm_full_path = os.path.join(settings.BASE_DIR, "app", "models", "svm_full_sample_custom.pkl")
+        svm_one_path = os.path.join(settings.BASE_DIR, "app", "models", "svm_one_sample_custom.pkl")
+
+        if os.path.exists(svm_full_path):
+            svm_full_model, svm_full_vectorizer = load_svm_full_model(svm_full_path)
+            label = _predict_single_svm_project_label(svm_full_model, svm_full_vectorizer, cleaned_text)
+            custom_preds["svm"] = label
+
+        elif os.path.exists(svm_one_path):
+            svm_one_model, svm_one_vectorizer = load_svm_one_model(svm_one_path)
+            label = _predict_single_svm_project_label(svm_one_model, svm_one_vectorizer, cleaned_text)
+            custom_preds["svm"] = label
     except Exception as e:
         print(f"Lỗi SVM Custom: {e}")
 

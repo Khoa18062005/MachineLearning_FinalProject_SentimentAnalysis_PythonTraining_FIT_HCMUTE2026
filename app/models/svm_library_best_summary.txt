@@ -1,0 +1,16 @@
+BEST RESULT - SVM LIBRARY GRID SEARCH
+================================================================================
+Best Search Space     : word_only
+Best CV Accuracy      : 78.6566%
+Selected Search Time  : 1010.03s
+Total Search Time     : 2849.98s
+Best Params:
+  - svm__C: 0.5
+  - svm__class_weight: None
+  - svm__max_iter: 20000
+  - svm__tol: 0.0001
+  - vectorizer__max_df: 0.95
+  - vectorizer__max_features: 100000
+  - vectorizer__min_df: 2
+  - vectorizer__ngram_range: (1, 3)
+  - vectorizer__sublinear_tf: True
