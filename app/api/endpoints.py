@@ -1,31 +1,47 @@
 from fastapi import APIRouter
 import os
+
 from app.models.Multinomial_Custom import predict_MNB_Custom, load_model
+from app.models.XGBoost_Custom import (
+    predict_XGB_Custom,
+    load_model as load_xgb_model,
+    load_vectorizer
+)
+
+from app.models.XGBoost_Library import (
+    predict_XGB_Library,
+    load_model as load_xgb_library_model,
+    load_vectorizer as load_xgb_library_vectorizer
+)
+
 from app.services import ml_service, evaluation_service
 from app.core.config import settings
 from app.services.evaluation_service import calculate_performance_metrics
 from app.services.ml_service import get_clean_datasets_for_training
+
 router = APIRouter()
 PREDICTION_CACHE = {}
+
+
 @router.get("/preview-data")
 async def preview():
     data = ml_service.get_data_preview(limit=200000)
     return {"status": "success", "data": data}
 
+
 @router.get("/dataset/{set_name}")
 async def get_dataset(set_name: str):
-    # Gọi hàm tổng quát bên ml_service
     result = ml_service.get_dataset_by_name(set_name=set_name, limit=200000)
 
     return {
         "status": "success",
         "data": result["records"],
-        "counts": result["counts"]  # Trả về cả số lượng mẫu để frontend hiển thị
+        "counts": result["counts"]
     }
+
 
 @router.get("/clean-dataset/{set_name}")
 async def get_clean_dataset(set_name: str):
-    # Gọi hàm lấy dữ liệu sạch
     result = ml_service.get_clean_dataset_by_name(set_name=set_name, limit=200000)
 
     return {
@@ -34,30 +50,32 @@ async def get_clean_dataset(set_name: str):
         "counts": result["counts"]
     }
 
+
 @router.get("/train-models")
 async def get_training_results():
     results = []
     _, _, df_test = get_clean_datasets_for_training()
-    X_test = df_test['text'].fillna('')
-    y_test = df_test['target']
+    X_test = df_test["text"].fillna("")
+    y_test = df_test["target"]
 
-    # --- ĐÁNH GIÁ MÔ HÌNH MNB CUSTOM ---
-    model_path = os.path.join(settings.BASE_DIR, "app", "models", "MNB_model_custom.pkl")
-    model_key = "MNB_Custom" # Đặt một cái tên khóa cho Cache
+    # =========================================================
+    # 1) ĐÁNH GIÁ MÔ HÌNH MNB CUSTOM
+    # =========================================================
+    mnb_model_path = os.path.join(settings.BASE_DIR, "app", "models", "MNB_model_custom.pkl")
+    mnb_model_key = "MNB_Custom"
 
-    if os.path.exists(model_path):
-        priors, w_probs, vocab, totals, train_time = load_model(model_path)
+    if os.path.exists(mnb_model_path):
+        priors, w_probs, vocab, totals, train_time = load_model(mnb_model_path)
 
-        # KIỂM TRA CACHE: Nếu đã có thì lấy ra, nếu chưa thì mới chạy dự đoán
-        if model_key in PREDICTION_CACHE:
-            y_pred = PREDICTION_CACHE[model_key]
+        if mnb_model_key in PREDICTION_CACHE:
+            y_pred = PREDICTION_CACHE[mnb_model_key]
         else:
             y_pred = []
             for text in X_test:
                 label, _ = predict_MNB_Custom(text, priors, w_probs, vocab, totals)
                 y_pred.append(label)
-            # Tính xong thì LƯU VÀO CACHE cho lần sau dùng
-            PREDICTION_CACHE[model_key] = y_pred
+
+            PREDICTION_CACHE[mnb_model_key] = y_pred
 
         mnb_metrics = calculate_performance_metrics(
             model_name="Multinomial Naive Bayes (Custom)",
@@ -75,55 +93,191 @@ async def get_training_results():
             "accuracy": 0
         })
 
+    # =========================================================
+    # 2) ĐÁNH GIÁ MÔ HÌNH XGBOOST CUSTOM
+    # =========================================================
+    xgb_model_path = os.path.join(settings.BASE_DIR, "app", "models", "XGB_model_custom.pkl")
+    xgb_vectorizer_path = os.path.join(settings.BASE_DIR, "app", "models", "XGB_vectorizer.pkl")
+    xgb_model_key = "XGB_Custom"
+
+    if os.path.exists(xgb_model_path) and os.path.exists(xgb_vectorizer_path):
+        (
+            base_score_logit,
+            trees,
+            learning_rate,
+            feature_names,
+            classes,
+            threshold,
+            train_time,
+            params
+        ) = load_xgb_model(xgb_model_path)
+
+        vectorizer = load_vectorizer(xgb_vectorizer_path)
+
+        if xgb_model_key in PREDICTION_CACHE:
+            y_pred = PREDICTION_CACHE[xgb_model_key]
+        else:
+            y_pred = []
+            for text in X_test:
+                label, _ = predict_XGB_Custom(
+                    text_input=text,
+                    base_score_logit=base_score_logit,
+                    trees=trees,
+                    learning_rate=learning_rate,
+                    feature_names=feature_names,
+                    classes=classes,
+                    threshold=threshold,
+                    vectorizer=vectorizer
+                )
+                y_pred.append(label)
+
+            PREDICTION_CACHE[xgb_model_key] = y_pred
+
+        xgb_metrics = calculate_performance_metrics(
+            model_name="XGBoost (Custom)",
+            y_true=y_test,
+            y_pred=y_pred,
+            training_time_sec=train_time
+        )
+        results.append(xgb_metrics)
+    else:
+        results.append({
+            "model_name": "XGBoost (Custom - Chưa huấn luyện)",
+            "training_time_sec": 0,
+            "correct_predictions": 0,
+            "incorrect_predictions": 0,
+            "accuracy": 0
+        })
+
+    xgb_lib_model_path = os.path.join(settings.BASE_DIR, "app", "models", "XGB_model_library.pkl")
+    xgb_lib_vectorizer_path = os.path.join(settings.BASE_DIR, "app", "models", "XGB_vectorizer_library.pkl")
+    xgb_lib_model_key = "XGB_Library"
+
+    if os.path.exists(xgb_lib_model_path) and os.path.exists(xgb_lib_vectorizer_path):
+        (
+            model,
+            feature_names,
+            classes,
+            threshold,
+            train_time,
+            params
+        ) = load_xgb_library_model(xgb_lib_model_path)
+
+        vectorizer = load_xgb_library_vectorizer(xgb_lib_vectorizer_path)
+
+        if xgb_lib_model_key in PREDICTION_CACHE:
+            y_pred = PREDICTION_CACHE[xgb_lib_model_key]
+        else:
+            y_pred = []
+            for text in X_test:
+                label, _ = predict_XGB_Library(
+                    text_input=text,
+                    model=model,
+                    classes=classes,
+                    threshold=threshold,
+                    vectorizer=vectorizer
+                )
+                y_pred.append(label)
+
+            PREDICTION_CACHE[xgb_lib_model_key] = y_pred
+
+        xgb_lib_metrics = calculate_performance_metrics(
+            model_name="XGBoost (Library)",
+            y_true=y_test,
+            y_pred=y_pred,
+            training_time_sec=train_time
+        )
+        results.append(xgb_lib_metrics)
+    else:
+        results.append({
+            "model_name": "XGBoost (Library - Chưa huấn luyện)",
+            "training_time_sec": 0,
+            "correct_predictions": 0,
+            "incorrect_predictions": 0,
+            "accuracy": 0
+        })
+
     return {"status": "success", "data": results}
 
 
 @router.get("/model-errors")
 async def get_model_errors(model_name: str):
     _, _, df_test = get_clean_datasets_for_training()
-    X_test = df_test['text'].fillna('')
+    X_test = df_test["text"].fillna("")
 
     y_pred = []
 
-    # Xử lý mô hình Multinomial Naive Bayes (Custom)
+    # =========================================================
+    # 1) XỬ LÝ MÔ HÌNH MNB CUSTOM
+    # =========================================================
     if model_name == "Multinomial Naive Bayes (Custom)":
         model_key = "MNB_Custom"
 
-        # ĐỌC TỪ CACHE: Cực kỳ nhanh!
         if model_key in PREDICTION_CACHE:
             y_pred = PREDICTION_CACHE[model_key]
         else:
-            # Fallback (Phòng hờ): Lỡ server bị restart mất cache thì mới phải tính lại
-            model_path = os.path.join(settings.BASE_DIR, "app", "models", "MNB_model_custom.pkl")
-            priors, w_probs, vocab, totals, _ = load_model(model_path)
+            mnb_model_path = os.path.join(settings.BASE_DIR, "app", "models", "MNB_model_custom.pkl")
+            priors, w_probs, vocab, totals, _ = load_model(mnb_model_path)
+
             for text in X_test:
                 label, _ = predict_MNB_Custom(text, priors, w_probs, vocab, totals)
                 y_pred.append(label)
+
             PREDICTION_CACHE[model_key] = y_pred
 
-    #=========================================
-    # ... (Mấy ông viết tiếp phần xử lý mô hình tương tự ở đây nhé) ...
+    # =========================================================
+    # 2) XỬ LÝ MÔ HÌNH XGBOOST CUSTOM
+    # =========================================================
+    elif model_name == "XGBoost (Custom)":
+        model_key = "XGB_Custom"
 
-    #=========================================
+        if model_key in PREDICTION_CACHE:
+            y_pred = PREDICTION_CACHE[model_key]
+        else:
+            xgb_model_path = os.path.join(settings.BASE_DIR, "app", "models", "XGB_model_custom.pkl")
+            xgb_vectorizer_path = os.path.join(settings.BASE_DIR, "app", "models", "XGB_vectorizer.pkl")
+
+            (
+                base_score_logit,
+                trees,
+                learning_rate,
+                feature_names,
+                classes,
+                threshold,
+                _,
+                params
+            ) = load_xgb_model(xgb_model_path)
+
+            vectorizer = load_vectorizer(xgb_vectorizer_path)
+
+            for text in X_test:
+                label, _ = predict_XGB_Custom(
+                    text_input=text,
+                    base_score_logit=base_score_logit,
+                    trees=trees,
+                    learning_rate=learning_rate,
+                    feature_names=feature_names,
+                    classes=classes,
+                    threshold=threshold,
+                    vectorizer=vectorizer
+                )
+                y_pred.append(label)
+
+            PREDICTION_CACHE[model_key] = y_pred
+
+        PREDICTION_CACHE[model_key] = y_pred
+
+    else:
+        return {
+            "status": "error",
+            "message": f"Model '{model_name}' không được hỗ trợ."
+        }
 
     df_result = df_test.copy()
-    df_result['predicted'] = y_pred
-    df_errors = df_result[df_result['target'] != df_result['predicted']]
-    result_data = df_errors[['target', 'predicted', 'text']].to_dict(orient="records")
+    df_result["predicted"] = y_pred
+    df_errors = df_result[df_result["target"] != df_result["predicted"]]
+    result_data = df_errors[["target", "predicted", "text"]].to_dict(orient="records")
+
+
 
     return {"status": "success", "data": result_data}
-
-
-@router.get("/model-details")
-async def get_model_prediction_details(text: str):
-    model_path = os.path.join(settings.BASE_DIR, "app", "models", "MNB_model_custom.pkl")
-    if not os.path.exists(model_path):
-        return {"status": "error", "message": "Model not found"}
-
-    priors, w_probs, vocab, totals, _ = load_model(model_path)
-
-    # Import hàm vừa viết ở bước 1
-    from app.models.Multinomial_Custom import get_prediction_details
-    details = get_prediction_details(text, priors, w_probs, vocab, totals)
-
-    return {"status": "success", "data": details}
