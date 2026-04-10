@@ -9,24 +9,39 @@ from app.core.nlp_config import lemmatizer, CUSTOM_STOP_WORDS
 COLUMNS = ["target", "id", "date", "flag", "user", "text"]
 DATA_PATH = os.path.join(os.path.dirname(__file__), "../../data_training/Database_Emotion.csv")
 limit_max = 200000
+
 # Các tập dữ liệu chưa được tiền xử lý
 GLOBAL_TRAIN = None
 GLOBAL_VAL = None
 GLOBAL_TEST = None
+
 # Dữ liệu đã được tiền xử lý
 GLOBAL_CLEAN_TRAIN = None
 GLOBAL_CLEAN_VAL = None
 GLOBAL_CLEAN_TEST = None
 
+# Giữ lại các từ phủ định vì rất quan trọng cho sentiment
+NEGATION_WORDS = {
+    "no", "nor", "not", "never", "none", "nobody",
+    "nothing", "neither", "nowhere", "cannot"
+}
+
+# Stopwords an toàn hơn: bỏ phủ định ra khỏi danh sách stopwords
+SAFE_STOP_WORDS = set(CUSTOM_STOP_WORDS) - NEGATION_WORDS
+
+
 def _load_raw_df(limit=limit_max):
     return pd.read_csv(DATA_PATH, names=COLUMNS, nrows=limit, encoding='latin-1')
+
 
 def get_total_sample(df):
     return f'{df.shape[0]}'
 
+
 def get_data_preview(limit=limit_max):
     df = _load_raw_df(limit)
     return df.to_dict(orient="records")
+
 
 def get_data_features(limit=limit_max):
     df = _load_raw_df(limit)
@@ -35,6 +50,7 @@ def get_data_features(limit=limit_max):
     df = df[features]
     df['needs_processing'] = df['text'].apply(check_needs_processing)
     return df.to_dict(orient="records")
+
 
 def check_needs_processing(text):
     """Kiểm tra xem văn bản có chứa các thành phần cần xử lý không"""
@@ -48,10 +64,11 @@ def check_needs_processing(text):
     # 3. Kiểm tra số
     if re.search(r"\d+", text):
         return True
-    # 4. Kiểm tra ký tự đặc biệt, emoji (Tìm các ký tự KHÔNG phải là chữ cái (a-z, A-Z) và khoảng trắng)
+    # 4. Kiểm tra ký tự đặc biệt, emoji
     if re.search(r"[^a-zA-Z\s]", text):
         return True
     return False
+
 
 def split_and_prepare_datasets(limit=limit_max):
     """Hàm cắt dữ liệu và lưu thẳng vào 3 biến toàn cục"""
@@ -81,6 +98,7 @@ def split_and_prepare_datasets(limit=limit_max):
     GLOBAL_VAL = df_val
     GLOBAL_TEST = df_test
 
+
 def get_dataset_by_name(set_name="train", limit=limit_max):
     """Hàm tổng quát: trả tập dữ liệu theo yêu cầu Frontend"""
     # 1. Gọi hàm cắt dữ liệu (Nó sẽ tự kiểm tra xem đã cắt chưa)
@@ -109,43 +127,117 @@ def get_dataset_by_name(set_name="train", limit=limit_max):
         "counts": counts
     }
 
+
 def get_datasets_for_training(limit=limit_max):
     """Hàm này dùng ở Backend để lấy 3 tập dữ liệu đưa vào huấn luyện mô hình sau này"""
     split_and_prepare_datasets(limit)
     return GLOBAL_TRAIN, GLOBAL_VAL, GLOBAL_TEST
 
 
-def clean_text(text):
-    """Hàm tiền xử lý văn bản (Bám sát theo yêu cầu 5 bước)"""
-    # 0. Chuyển thành chữ thường
-    text = str(text).lower()
+def _normalize_contractions(text):
+    """Chuẩn hóa phủ định và contractions để không làm mất nghĩa sentiment"""
+    contraction_rules = [
+        (r"won['’]t", "will not"),
+        (r"can['’]t", "can not"),
+        (r"ain['’]t", "is not"),
+        (r"n['’]t\b", " not"),
+        (r"['’]re\b", " are"),
+        (r"['’]s\b", " is"),
+        (r"['’]d\b", " would"),
+        (r"['’]ll\b", " will"),
+        (r"['’]ve\b", " have"),
+        (r"['’]m\b", " am"),
+    ]
 
-    # 1. Xoá URL, đường liên kết
-    text = re.sub(r"http\S+|www\S+|https\S+", "", text, flags=re.IGNORECASE)
-
-    # 2. Hoá hastag (#) và mention (@)
-    text = re.sub(r"[@#]\w+", "", text)
-
-    # 3. Xóa số
-    text = re.sub(r"\d+", "", text)
-
-    # 4. Xóa ký tự đặc biệt
-    text = re.sub(r"[^a-zA-Z\s]", "", text)
-
-    # 5. Xóa stopwords và Lemmatization
-    words = text.split()
-    cleaned_words = []
-    for word in words:
-        # Sử dụng biến CUSTOM_STOP_WORDS đã import từ nlp_config.py
-        if word not in CUSTOM_STOP_WORDS:
-            # Sử dụng công cụ lemmatizer đã import
-            lemma_word = lemmatizer.lemmatize(word)
-            cleaned_words.append(lemma_word)
-
-    # Ghép lại thành câu hoàn chỉnh
-    text = " ".join(cleaned_words)
+    for pattern, replacement in contraction_rules:
+        text = re.sub(pattern, replacement, text)
 
     return text
+
+
+def _replace_emoticons(text):
+    """Đổi emoticon/emoji cơ bản thành token có nghĩa sentiment"""
+    text = re.sub(r"(<3|❤|❤️)", " heart_emoji ", text)
+
+    # positive
+    text = re.sub(
+        r"(:\s?\)|:-\)|\(\s?:|\(-:|:\]|=\)|:d|:-d|=d|xd|x-d)",
+        " positive_emoji ",
+        text
+    )
+
+    # negative
+    text = re.sub(
+        r"(:\s?\(|:-\(|\)\s?:|\)-:|:\[|=\(|:'\()",
+        " negative_emoji ",
+        text
+    )
+
+    # wink
+    text = re.sub(
+        r"(;-\)|;\)|;-d|;d)",
+        " wink_emoji ",
+        text
+    )
+
+    return text
+
+
+def clean_text(text):
+    """Hàm tiền xử lý văn bản - bản nới lỏng hơn cho sentiment tweet"""
+    # 0. Chuyển thành chữ thường
+    text = str(text).lower().strip()
+
+    # 1. Chuẩn hóa contractions trước để giữ phủ định
+    text = _normalize_contractions(text)
+
+    # 2. Đổi emoticon cơ bản thành token sentiment
+    text = _replace_emoticons(text)
+
+    # 3. URL -> token chung thay vì xóa sạch
+    text = re.sub(r"http\S+|www\S+|https\S+", " url ", text, flags=re.IGNORECASE)
+
+    # 4. Mention -> token chung
+    text = re.sub(r"@\w+", " user_mention ", text)
+
+    # 5. Hashtag: bỏ dấu # nhưng giữ nội dung từ
+    #    ví dụ #happy -> happy
+    text = re.sub(r"#(\w+)", r" \1 ", text)
+
+    # 6. Bỏ token retweet
+    text = re.sub(r"\brt\b", " ", text)
+
+    # 7. Xóa số
+    text = re.sub(r"\d+", " ", text)
+
+    # 8. Giảm ký tự lặp quá dài: sooooo happy -> soo happy
+    text = re.sub(r"(.)\1{2,}", r"\1\1", text)
+
+    # 9. Xóa ký tự đặc biệt nhưng vẫn giữ underscore để bảo toàn token kiểu positive_emoji
+    text = re.sub(r"[^a-zA-Z_\s]", " ", text)
+
+    # 10. Chuẩn hóa khoảng trắng
+    text = re.sub(r"\s+", " ", text).strip()
+
+    # 11. Xóa stopwords nhưng giữ lại phủ định + lemmatization
+    words = text.split()
+    cleaned_words = []
+
+    for word in words:
+        if word in SAFE_STOP_WORDS:
+            continue
+
+        lemma_word = lemmatizer.lemmatize(word)
+
+        if lemma_word and lemma_word not in SAFE_STOP_WORDS:
+            cleaned_words.append(lemma_word)
+
+    # 12. Ghép lại thành câu hoàn chỉnh
+    text = " ".join(cleaned_words)
+    text = re.sub(r"\s+", " ", text).strip()
+
+    return text
+
 
 def prepare_clean_datasets(limit=limit_max):
     """Hàm tạo 3 tập dữ liệu sạch và lưu vào biến toàn cục"""
@@ -168,7 +260,7 @@ def prepare_clean_datasets(limit=limit_max):
     df_clean_val['text'] = df_clean_val['text'].apply(clean_text)
     df_clean_test['text'] = df_clean_test['text'].apply(clean_text)
 
-    # 4. Cập nhật lại cờ 'needs_processing' thành False (vì dữ liệu đã sạch bong, không cần in màu đỏ ở frontend nữa)
+    # 4. Cập nhật lại cờ 'needs_processing' thành False
     df_clean_train['needs_processing'] = False
     df_clean_val['needs_processing'] = False
     df_clean_test['needs_processing'] = False
@@ -208,6 +300,5 @@ def get_clean_datasets_for_training(limit=limit_max):
     """
     Hàm này dùng để xuất 3 tập dữ liệu SẠCH ra ngoài cho các file huấn luyện mô hình.
     """
-    # Đảm bảo dữ liệu đã được làm sạch trước khi trả về
     prepare_clean_datasets(limit)
     return GLOBAL_CLEAN_TRAIN, GLOBAL_CLEAN_VAL, GLOBAL_CLEAN_TEST
