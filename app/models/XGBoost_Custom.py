@@ -1,12 +1,14 @@
-import numpy as np
-import pandas as pd
-import pickle
-import time
 import os
+import time
+import pickle
 import random
 
+import numpy as np
+import pandas as pd
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics import accuracy_score
+
+from app.services.evaluation_service import save_confusion_matrix_chart
 
 
 # =========================
@@ -40,25 +42,37 @@ def sigmoid(x):
     return 1.0 / (1.0 + np.exp(-x))
 
 
+def _normalize_text_input(X_text):
+    return pd.Series(X_text).fillna('').astype(str).reset_index(drop=True)
+
+
 # =========================
 # PHẦN XỬ LÝ TEXT -> VECTOR
 # =========================
-def fit_text_vectorizer(X_train_text, max_features=2000, ngram_range=(1, 1)):
+def fit_text_vectorizer(
+    X_train_text,
+    max_features=1500,
+    ngram_range=(1, 1),
+    min_df=2,
+    max_df=0.98
+):
     vectorizer = TfidfVectorizer(
         max_features=max_features,
-        ngram_range=ngram_range
+        ngram_range=ngram_range,
+        min_df=min_df,
+        max_df=max_df,
+        sublinear_tf=True,
+        dtype=np.float32
     )
-    X_vec = vectorizer.fit_transform(pd.Series(X_train_text).fillna('').astype(str)).astype(np.float32).toarray()
+
+    X_vec = vectorizer.fit_transform(_normalize_text_input(X_train_text)).toarray()
     feature_names = list(vectorizer.get_feature_names_out())
-    X_df = pd.DataFrame(X_vec, columns=feature_names)
-    return vectorizer, X_df, feature_names
+    return vectorizer, X_vec, feature_names
 
 
 def transform_text_with_vectorizer(X_text, vectorizer):
-    X_vec = vectorizer.transform(pd.Series(X_text).fillna('').astype(str)).astype(np.float32).toarray()
-    feature_names = list(vectorizer.get_feature_names_out())
-    X_df = pd.DataFrame(X_vec, columns=feature_names)
-    return X_df
+    X_vec = vectorizer.transform(_normalize_text_input(X_text)).toarray()
+    return X_vec.astype(np.float32, copy=False)
 
 
 # =========================
@@ -66,29 +80,29 @@ def transform_text_with_vectorizer(X_text, vectorizer):
 # =========================
 def prepare_features(X, feature_names=None):
     if isinstance(X, pd.Series):
-        X = X.to_frame().T
+        X = X.to_numpy(dtype=np.float32).reshape(1, -1)
 
-    if isinstance(X, pd.DataFrame):
+    elif isinstance(X, pd.DataFrame):
         if feature_names is not None:
             missing_cols = [col for col in feature_names if col not in X.columns]
             if missing_cols:
                 raise ValueError(f'Thiếu cột đầu vào: {missing_cols}')
             X = X[feature_names]
-        X_array = X.to_numpy(dtype=np.float32)
-        names = list(X.columns) if feature_names is None else list(feature_names)
-        return X_array, names
+        X = X.to_numpy(dtype=np.float32)
 
-    X_array = np.asarray(X, dtype=np.float32)
-    if X_array.ndim == 1:
-        X_array = X_array.reshape(1, -1)
+    else:
+        X = np.asarray(X, dtype=np.float32)
+
+    if X.ndim == 1:
+        X = X.reshape(1, -1)
 
     if feature_names is None:
-        feature_names = [f'feature_{i}' for i in range(X_array.shape[1])]
+        feature_names = [f'feature_{i}' for i in range(X.shape[1])]
     else:
-        if X_array.shape[1] != len(feature_names):
+        if X.shape[1] != len(feature_names):
             raise ValueError('Số lượng feature không khớp với feature_names đã lưu.')
 
-    return X_array, list(feature_names)
+    return X, list(feature_names)
 
 
 def encode_target(y):
@@ -124,7 +138,7 @@ def find_best_split(X, g, h, feature_indices, params):
     best_split = None
     G_total = np.sum(g)
     H_total = np.sum(h)
-    max_thresholds = params.get('max_thresholds_per_feature', 8)
+    max_thresholds = params.get('max_thresholds_per_feature', 4)
 
     for feature_idx in feature_indices:
         feature_values = X[:, feature_idx]
@@ -134,7 +148,7 @@ def find_best_split(X, g, h, feature_indices, params):
             continue
 
         if len(unique_values) > max_thresholds + 1:
-            quantiles = np.linspace(0.05, 0.95, max_thresholds)
+            quantiles = np.linspace(0.1, 0.9, max_thresholds)
             thresholds = np.unique(np.quantile(feature_values, quantiles))
         else:
             thresholds = (unique_values[:-1] + unique_values[1:]) / 2.0
@@ -223,12 +237,13 @@ def build_tree(X, g, h, depth, params):
 
 
 def predict_tree_single(x_row, node):
-    if node['is_leaf']:
-        return node['weight']
-
-    if x_row[node['feature_idx']] <= node['threshold']:
-        return predict_tree_single(x_row, node['left'])
-    return predict_tree_single(x_row, node['right'])
+    current = node
+    while not current['is_leaf']:
+        if x_row[current['feature_idx']] <= current['threshold']:
+            current = current['left']
+        else:
+            current = current['right']
+    return current['weight']
 
 
 def predict_tree_batch(X, tree):
@@ -242,7 +257,7 @@ def predict_tree_batch(X, tree):
 # HỖ TRỢ TĂNG TỐC KHI TUNE
 # =========================
 def sample_series(X, y, sample_ratio=1.0, random_state=42):
-    X_series = pd.Series(X).fillna('').astype(str).reset_index(drop=True)
+    X_series = _normalize_text_input(X)
     y_series = pd.Series(y).reset_index(drop=True)
 
     if sample_ratio >= 1.0:
@@ -261,21 +276,23 @@ def sample_series(X, y, sample_ratio=1.0, random_state=42):
 def train_XGB_Custom(
     X_train_text,
     y_train,
-    max_features=2000,
+    max_features=1500,
     ngram_range=(1, 1),
-    n_estimators=20,
+    n_estimators=15,
     learning_rate=0.1,
     max_depth=3,
     lambda_reg=1.0,
     gamma=0.0,
     min_child_weight=1.0,
-    min_samples_split=2,
-    min_samples_leaf=1,
-    subsample=0.8,
-    colsample_bytree=0.8,
+    min_samples_split=4,
+    min_samples_leaf=2,
+    subsample=0.7,
+    colsample_bytree=0.25,
     threshold=0.5,
     random_state=42,
-    max_thresholds_per_feature=8,
+    max_thresholds_per_feature=4,
+    min_df=2,
+    max_df=0.98,
     save_artifacts=True,
     model_filename='XGB_model_custom.pkl',
     vectorizer_filename='XGB_vectorizer.pkl',
@@ -283,15 +300,17 @@ def train_XGB_Custom(
     verbose=True
 ):
     start_time = time.time()
-    np.random.seed(random_state)
+    rng = np.random.default_rng(random_state)
 
-    vectorizer, X_train_df, feature_names = fit_text_vectorizer(
+    vectorizer, X_train_array, feature_names = fit_text_vectorizer(
         X_train_text=X_train_text,
         max_features=max_features,
-        ngram_range=ngram_range
+        ngram_range=ngram_range,
+        min_df=min_df,
+        max_df=max_df
     )
 
-    X, feature_names = prepare_features(X_train_df)
+    X, feature_names = prepare_features(X_train_array, feature_names=feature_names)
     y, classes = encode_target(y_train)
 
     n_samples, n_features = X.shape
@@ -309,13 +328,13 @@ def train_XGB_Custom(
 
         if 0 < subsample < 1.0:
             sample_size = max(1, int(subsample * n_samples))
-            row_idx = np.random.choice(n_samples, size=sample_size, replace=False)
+            row_idx = rng.choice(n_samples, size=sample_size, replace=False)
         else:
             row_idx = np.arange(n_samples)
 
         if 0 < colsample_bytree < 1.0:
             feature_size = max(1, int(colsample_bytree * n_features))
-            feature_indices = np.random.choice(n_features, size=feature_size, replace=False)
+            feature_indices = rng.choice(n_features, size=feature_size, replace=False)
         else:
             feature_indices = np.arange(n_features)
 
@@ -369,7 +388,9 @@ def train_XGB_Custom(
             'subsample': subsample,
             'colsample_bytree': colsample_bytree,
             'random_state': random_state,
-            'max_thresholds_per_feature': max_thresholds_per_feature
+            'max_thresholds_per_feature': max_thresholds_per_feature,
+            'min_df': min_df,
+            'max_df': max_df
         },
         'training_time_sec': training_duration
     }
@@ -409,8 +430,8 @@ def predict_XGB_Custom(
     else:
         X_input = text_input
 
-    X_text_df = transform_text_with_vectorizer(X_input, vectorizer)
-    X, _ = prepare_features(X_text_df, feature_names=feature_names)
+    X_text_array = transform_text_with_vectorizer(X_input, vectorizer)
+    X, _ = prepare_features(X_text_array, feature_names=feature_names)
     raw_scores = np.full(X.shape[0], base_score_logit, dtype=np.float32)
 
     for tree in trees:
@@ -421,38 +442,168 @@ def predict_XGB_Custom(
     pred_int = (prob_positive >= threshold).astype(int)
     predictions = np.where(pred_int == 1, classes[1], classes[0])
 
+    if X.shape[0] == 1:
+        return predictions[0], {
+            classes[0]: float(prob_negative[0]),
+            classes[1]: float(prob_positive[0])
+        }
+
     results_df = pd.DataFrame({
         classes[0]: prob_negative,
         classes[1]: prob_positive
     })
 
-    if X.shape[0] == 1:
-        return predictions[0], results_df.iloc[0].to_dict()
-
     return predictions, results_df
 
 
 def evaluate_XGB_Custom(X_eval_text, y_eval, model_data, vectorizer):
-    y_pred = []
-    for text in X_eval_text:
-        label, _ = predict_XGB_Custom(
-            text_input=text,
-            base_score_logit=model_data['base_score_logit'],
-            trees=model_data['trees'],
-            learning_rate=model_data['learning_rate'],
-            feature_names=model_data['feature_names'],
-            classes=model_data['classes'],
-            threshold=model_data['threshold'],
-            vectorizer=vectorizer
-        )
-        y_pred.append(label)
+    y_pred, _ = predict_XGB_Custom(
+        text_input=list(_normalize_text_input(X_eval_text)),
+        base_score_logit=model_data['base_score_logit'],
+        trees=model_data['trees'],
+        learning_rate=model_data['learning_rate'],
+        feature_names=model_data['feature_names'],
+        classes=model_data['classes'],
+        threshold=model_data['threshold'],
+        vectorizer=vectorizer
+    )
+
+    if isinstance(y_pred, np.ndarray):
+        y_pred = y_pred.tolist()
+    else:
+        y_pred = [y_pred]
 
     acc = accuracy_score(y_eval, y_pred)
     return float(acc), y_pred
 
 
 # =========================
-# AUTO TUNE CHO XGB CUSTOM - BẢN NHANH HƠN
+# GIẢI THÍCH QUYẾT ĐỊNH CHO 1 MẪU
+# =========================
+def _trace_tree_path(x_row, node):
+    path = []
+    current = node
+
+    while not current['is_leaf']:
+        feature_idx = current['feature_idx']
+        feature_value = float(x_row[feature_idx])
+        threshold = float(current['threshold'])
+        go_left = feature_value <= threshold
+
+        path.append({
+            'feature_idx': int(feature_idx),
+            'feature_name': current.get('feature_name', f'feature_{feature_idx}'),
+            'feature_value': feature_value,
+            'threshold': threshold,
+            'direction': 'left' if go_left else 'right',
+            'gain': float(current.get('gain', 0.0)),
+            'depth': int(current.get('depth', 0))
+        })
+
+        current = current['left'] if go_left else current['right']
+
+    return path, current
+
+
+def get_prediction_details_XGB_Custom(text_input, model_data, vectorizer, top_k_features=12, top_k_trees=8):
+    X_vec = transform_text_with_vectorizer([text_input], vectorizer)
+    x_row = X_vec[0].astype(np.float32, copy=False)
+
+    feature_names = model_data['feature_names']
+    classes = model_data['classes']
+    threshold = float(model_data['threshold'])
+    learning_rate = float(model_data['learning_rate'])
+    base_score_logit = float(model_data['base_score_logit'])
+
+    nonzero_idx = np.where(x_row > 0)[0]
+    tfidf_features = [
+        {
+            'feature': feature_names[idx],
+            'tfidf_value': float(x_row[idx])
+        }
+        for idx in nonzero_idx
+    ]
+    tfidf_features = sorted(tfidf_features, key=lambda item: abs(item['tfidf_value']), reverse=True)
+
+    running_logit = base_score_logit
+    tree_details = []
+    feature_contribs = {}
+
+    for tree_index, tree in enumerate(model_data['trees'], start=1):
+        path, leaf = _trace_tree_path(x_row, tree)
+        leaf_weight = float(leaf['weight'])
+        tree_contribution = learning_rate * leaf_weight
+        running_logit += tree_contribution
+
+        if path:
+            split_count = len(path)
+            for step in path:
+                fname = step['feature_name']
+                feature_contribs[fname] = feature_contribs.get(fname, 0.0) + (tree_contribution / split_count)
+
+        tree_details.append({
+            'tree_index': tree_index,
+            'leaf_weight': leaf_weight,
+            'tree_contribution': float(tree_contribution),
+            'path_length': len(path),
+            'path': path
+        })
+
+    prob_positive = float(sigmoid(running_logit))
+    prob_negative = float(1.0 - prob_positive)
+    predicted_label = classes[1] if prob_positive >= threshold else classes[0]
+
+    top_feature_rows = []
+    for item in tfidf_features:
+        feature = item['feature']
+        contrib = float(feature_contribs.get(feature, 0.0))
+        top_feature_rows.append({
+            'feature': feature,
+            'tfidf_value': item['tfidf_value'],
+            'approx_contribution': contrib,
+            'direction': 'ủng hộ lớp dương' if contrib >= 0 else 'ủng hộ lớp âm'
+        })
+
+    top_feature_rows = sorted(
+        top_feature_rows,
+        key=lambda item: (abs(item['approx_contribution']), abs(item['tfidf_value'])),
+        reverse=True
+    )[:top_k_features]
+
+    top_trees = sorted(tree_details, key=lambda item: abs(item['tree_contribution']), reverse=True)[:top_k_trees]
+
+    params = model_data.get('params', {})
+    best_params = model_data.get('best_params', params.get('best_params'))
+
+    return {
+        'model_type': 'xgb_custom',
+        'input_text': str(text_input),
+        'predicted_label': predicted_label,
+        'threshold': threshold,
+        'raw_score_logit': float(running_logit),
+        'base_score_logit': base_score_logit,
+        'probabilities': {
+            str(classes[0]): prob_negative,
+            str(classes[1]): prob_positive
+        },
+        'training_summary': {
+            'training_time_sec': float(model_data.get('training_time_sec', 0.0)),
+            'best_score_val': model_data.get('best_score_val'),
+            'n_trials': model_data.get('n_trials'),
+            'best_params': best_params,
+            'params': params
+        },
+        'top_features': top_feature_rows,
+        'top_trees': top_trees,
+        'decision_reason': (
+            f"Mô hình cộng dồn base logit với đóng góp của {len(model_data['trees'])} cây. "
+            f"Nếu xác suất lớp {classes[1]} >= threshold thì chọn lớp {classes[1]}, ngược lại chọn lớp {classes[0]}."
+        )
+    }
+
+
+# =========================
+# AUTO TUNE CHO XGB CUSTOM
 # =========================
 def sample_random_params(search_space, rng):
     return {
@@ -469,7 +620,9 @@ def sample_random_params(search_space, rng):
         'subsample': rng.choice(search_space['subsample']),
         'colsample_bytree': rng.choice(search_space['colsample_bytree']),
         'threshold': rng.choice(search_space['threshold']),
-        'max_thresholds_per_feature': rng.choice(search_space['max_thresholds_per_feature'])
+        'max_thresholds_per_feature': rng.choice(search_space['max_thresholds_per_feature']),
+        'min_df': rng.choice(search_space['min_df']),
+        'max_df': rng.choice(search_space['max_df'])
     }
 
 
@@ -478,13 +631,13 @@ def train_XGB_Custom_AutoTune(
     y_train,
     X_val_text,
     y_val,
-    n_trials=8,
+    n_trials=4,
     random_state=42,
     search_space=None,
     retrain_on_train_val=True,
-    early_stop_patience=3,
-    tune_train_sample_ratio=0.7,
-    tune_val_sample_ratio=1.0,
+    early_stop_patience=2,
+    tune_train_sample_ratio=0.25,
+    tune_val_sample_ratio=0.5,
     model_filename='XGB_model_custom.pkl',
     vectorizer_filename='XGB_vectorizer.pkl'
 ):
@@ -493,25 +646,27 @@ def train_XGB_Custom_AutoTune(
 
     if search_space is None:
         search_space = {
-            'max_features': [1500, 2000, 3000],
+            'max_features': [1500, 1800, 2200, 2500],
             'ngram_range': [(1, 1), (1, 2)],
-            'n_estimators': [15, 25, 35],
-            'learning_rate': [0.05, 0.08, 0.1],
-            'max_depth': [2, 3, 4],
-            'lambda_reg': [0.5, 1.0, 2.0],
-            'gamma': [0.0, 0.1],
+            'n_estimators': [20, 25, 30],
+            'learning_rate': [0.08, 0.1],
+            'max_depth': [3, 4],
+            'lambda_reg': [1.0, 1.5],
+            'gamma': [0.0],
             'min_child_weight': [1.0, 2.0],
-            'min_samples_split': [2, 4],
-            'min_samples_leaf': [1, 2],
-            'subsample': [0.7, 0.8],
-            'colsample_bytree': [0.7, 0.8],
+            'min_samples_split': [4],
+            'min_samples_leaf': [8],
+            'subsample': [0.6, 0.7],
+            'colsample_bytree': [0.15, 0.25],
             'threshold': [0.5],
-            'max_thresholds_per_feature': [6, 8]
+            'max_thresholds_per_feature': [8],
+            'min_df': [2, 3],
+            'max_df': [0.95, 0.98]
         }
 
-    X_train_text = pd.Series(X_train_text).fillna('').astype(str)
+    X_train_text = _normalize_text_input(X_train_text)
     y_train = pd.Series(y_train).reset_index(drop=True)
-    X_val_text = pd.Series(X_val_text).fillna('').astype(str)
+    X_val_text = _normalize_text_input(X_val_text)
     y_val = pd.Series(y_val).reset_index(drop=True)
 
     X_tune_train, y_tune_train = sample_series(
@@ -563,6 +718,8 @@ def train_XGB_Custom_AutoTune(
             threshold=params['threshold'],
             random_state=params['random_state'],
             max_thresholds_per_feature=params['max_thresholds_per_feature'],
+            min_df=params['min_df'],
+            max_df=params['max_df'],
             save_artifacts=False,
             return_vectorizer=True,
             verbose=False
@@ -627,6 +784,8 @@ def train_XGB_Custom_AutoTune(
             threshold=best_params['threshold'],
             random_state=best_params['random_state'],
             max_thresholds_per_feature=best_params['max_thresholds_per_feature'],
+            min_df=best_params['min_df'],
+            max_df=best_params['max_df'],
             save_artifacts=False,
             return_vectorizer=True,
             verbose=True
@@ -677,22 +836,44 @@ if __name__ == '__main__':
     X_val = df_val['text'].fillna('')
     y_val = df_val['target']
 
+    X_test = df_test['text'].fillna('')
+    y_test = df_test['target']
+
     model_metadata = train_XGB_Custom_AutoTune(
         X_train_text=X_train,
         y_train=y_train,
         X_val_text=X_val,
         y_val=y_val,
-        n_trials=8,
-        random_state=42,
+        n_trials=6,
+        random_state=67,
         retrain_on_train_val=True,
-        early_stop_patience=3,
-        tune_train_sample_ratio=0.7,
-        tune_val_sample_ratio=1.0,
+        early_stop_patience=2,
+        tune_train_sample_ratio=0.75,
+        tune_val_sample_ratio=0.5,
         model_filename='XGB_model_custom.pkl',
         vectorizer_filename='XGB_vectorizer.pkl'
     )
+
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    model_path = os.path.join(current_dir, 'XGB_model_custom.pkl')
+    vectorizer_path = os.path.join(current_dir, 'XGB_vectorizer.pkl')
+
+    with open(model_path, 'rb') as f:
+        trained_model_data = pickle.load(f)
+    with open(vectorizer_path, 'rb') as f:
+        trained_vectorizer = pickle.load(f)
+
+    _, y_pred = evaluate_XGB_Custom(
+        X_eval_text=X_test,
+        y_eval=y_test,
+        model_data=trained_model_data,
+        vectorizer=trained_vectorizer
+    )
+
+    save_confusion_matrix_chart(y_test, y_pred, 'xgb_custom')
 
     print('Train xong')
     print('Training time:', model_metadata['training_time_sec'], 'giây')
     print('Best params:', model_metadata['best_params'])
     print('Best val score:', model_metadata['best_score_val'])
+    print('Đã lưu confusion matrix: xgb_custom_cm.png')
