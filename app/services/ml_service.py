@@ -7,7 +7,7 @@ from sklearn.metrics import accuracy_score
 from app.core.nlp_config import lemmatizer, CUSTOM_STOP_WORDS
 
 COLUMNS = ["target", "id", "date", "flag", "user", "text"]
-DATA_PATH = os.path.join(os.path.dirname(__file__), "../../data_training/Data_Emotion.csv")
+DATA_PATH = os.path.join(os.path.dirname(__file__), "../../data_training/Database_Emotion.csv")
 limit_max = 200000
 # Các tập dữ liệu chưa được tiền xử lý
 GLOBAL_TRAIN = None
