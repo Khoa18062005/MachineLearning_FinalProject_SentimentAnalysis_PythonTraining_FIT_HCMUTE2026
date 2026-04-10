@@ -6,9 +6,13 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import xgboost as xgb
 from xgboost import XGBClassifier
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.model_selection import RandomizedSearchCV
+from sklearn.metrics import accuracy_score
+
+from app.services.evaluation_service import save_confusion_matrix_chart
 
 
 # =========================================================
@@ -22,7 +26,6 @@ if str(PROJECT_ROOT) not in sys.path:
 
 # =========================================================
 # LOAD MODEL / VECTORIZER
-# Trả về kiểu gần giống file cũ để dễ tích hợp endpoint
 # =========================================================
 def load_model(file_path):
     with open(file_path, "rb") as f:
@@ -168,8 +171,6 @@ def train_XGB_Library(
     }
 
     current_dir = os.path.dirname(os.path.abspath(__file__))
-
-    # Giữ tên file kiểu cũ để endpoint dễ dùng
     model_path = os.path.join(current_dir, "XGB_model_library.pkl")
     vectorizer_path = os.path.join(current_dir, "XGB_vectorizer_library.pkl")
 
@@ -219,8 +220,99 @@ def predict_XGB_Library(
     return predictions, results_df
 
 
+def evaluate_XGB_Library(X_eval_text, y_eval, model_data, vectorizer):
+    y_pred, _ = predict_XGB_Library(
+        text_input=list(pd.Series(X_eval_text).fillna("").astype(str)),
+        model=model_data["model"],
+        classes=model_data["classes"],
+        threshold=model_data["threshold"],
+        vectorizer=vectorizer
+    )
+
+    if isinstance(y_pred, np.ndarray):
+        y_pred = y_pred.tolist()
+    else:
+        y_pred = [y_pred]
+
+    acc = accuracy_score(y_eval, y_pred)
+    return float(acc), y_pred
+
+
 # =========================================================
-# CHẠY TRAIN GIỐNG FILE CŨ CỦA BẠN
+# GIẢI THÍCH QUYẾT ĐỊNH CHO 1 MẪU
+# =========================================================
+def get_prediction_details_XGB_Library(text_input, model_data, vectorizer, top_k_features=15):
+    model = model_data["model"]
+    classes = model_data["classes"]
+    threshold = float(model_data["threshold"])
+
+    X_vec = transform_text_with_vectorizer([text_input], vectorizer)
+    booster = model.get_booster()
+    dmatrix = xgb.DMatrix(X_vec, feature_names=model_data["feature_names"])
+
+    contribs = booster.predict(dmatrix, pred_contribs=True)[0]
+    bias = float(contribs[-1])
+    feature_contribs = contribs[:-1]
+
+    prob_positive = float(model.predict_proba(X_vec)[0, 1])
+    prob_negative = float(1.0 - prob_positive)
+    predicted_label = classes[1] if prob_positive >= threshold else classes[0]
+
+    nonzero_idx = X_vec[0].nonzero()[1]
+    tfidf_lookup = {int(idx): float(X_vec[0, idx]) for idx in nonzero_idx}
+
+    rows = []
+    for idx, contrib in enumerate(feature_contribs):
+        tfidf_value = tfidf_lookup.get(idx, 0.0)
+        if tfidf_value == 0.0 and abs(float(contrib)) < 1e-12:
+            continue
+
+        rows.append({
+            "feature": model_data["feature_names"][idx],
+            "tfidf_value": tfidf_value,
+            "contribution": float(contrib),
+            "direction": "ủng hộ lớp dương" if float(contrib) >= 0 else "ủng hộ lớp âm"
+        })
+
+    rows = sorted(rows, key=lambda item: abs(item["contribution"]), reverse=True)[:top_k_features]
+
+    booster_feature_gain = booster.get_score(importance_type="gain")
+    global_feature_gain = sorted(
+        [
+            {"feature": feature, "gain": float(gain)}
+            for feature, gain in booster_feature_gain.items()
+        ],
+        key=lambda item: item["gain"],
+        reverse=True
+    )[:10]
+
+    return {
+        "model_type": "xgb_library",
+        "input_text": str(text_input),
+        "predicted_label": predicted_label,
+        "threshold": threshold,
+        "probabilities": {
+            str(classes[0]): prob_negative,
+            str(classes[1]): prob_positive
+        },
+        "bias": bias,
+        "training_summary": {
+            "training_time_sec": float(model_data.get("training_time_sec", 0.0)),
+            "best_score_cv": model_data.get("best_score_cv"),
+            "best_params": model_data.get("best_params"),
+            "params": model_data.get("params", {})
+        },
+        "top_features": rows,
+        "global_feature_gain": global_feature_gain,
+        "decision_reason": (
+            "Bản Library dùng pred_contribs từ booster để giải thích từng feature "
+            "đã kéo xác suất về lớp âm hay lớp dương."
+        )
+    }
+
+
+# =========================================================
+# CHẠY TRAIN
 # =========================================================
 if __name__ == "__main__":
     from app.services.ml_service import get_clean_datasets_for_training
@@ -229,6 +321,9 @@ if __name__ == "__main__":
 
     X_train = df_train["text"].fillna("")
     y_train = df_train["target"]
+
+    X_test = df_test["text"].fillna("")
+    y_test = df_test["target"]
 
     model_metadata = train_XGB_Library(
         X_train_text=X_train,
@@ -246,9 +341,24 @@ if __name__ == "__main__":
     model_path = os.path.join(current_dir, "XGB_model_library.pkl")
     vectorizer_path = os.path.join(current_dir, "XGB_vectorizer_library.pkl")
 
+    with open(model_path, "rb") as f:
+        trained_model_data = pickle.load(f)
+    with open(vectorizer_path, "rb") as f:
+        trained_vectorizer = pickle.load(f)
+
+    _, y_pred = evaluate_XGB_Library(
+        X_eval_text=X_test,
+        y_eval=y_test,
+        model_data=trained_model_data,
+        vectorizer=trained_vectorizer
+    )
+
+    save_confusion_matrix_chart(y_test, y_pred, "xgb_library")
+
     print("Train xong")
     print("Training time:", model_metadata["training_time_sec"], "giây")
     print("Best params:", model_metadata["best_params"])
     print("Best CV score:", model_metadata["best_score_cv"])
     print("Model saved at:", model_path)
     print("Vectorizer saved at:", vectorizer_path)
+    print("Đã lưu confusion matrix: xgb_library_cm.png")
