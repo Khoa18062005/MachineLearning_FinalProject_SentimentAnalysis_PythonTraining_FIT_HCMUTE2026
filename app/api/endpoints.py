@@ -275,6 +275,8 @@ def _get_chart_candidates(model_type: str):
         "xgb_cm": ["cm_xgb_library.png", "cm_xgb_custom.png", "cm_xgb.png"],
         "svm": ["svm_study.png", "cm_svm_library.png"],
         "xgb": ["xgb_study.png", "cm_xgb_library.png"],
+        "ensemble_custom_cm": ["cm_ensemble_custom.png"],
+        "ensemble_library_cm": ["cm_ensemble_library.png"],
     }
     return charts_map.get(model_type, [])
 
@@ -645,6 +647,8 @@ async def get_clean_dataset(set_name: str):
 async def get_training_results():
     results = []
     _, X_test, y_test = _get_test_data()
+    preds_custom = {"mnb": [], "svm": [], "xgb": []}
+    preds_library = {"mnb": [], "svm": [], "xgb": []}
 
     # 1) MNB CUSTOM
     try:
@@ -662,6 +666,7 @@ async def get_training_results():
                     y_pred.append(int(label))
                 PREDICTION_CACHE[model_key] = y_pred
 
+            preds_custom["mnb"] = y_pred
             save_confusion_matrix_chart(y_test, y_pred, "mnb_custom")
 
             results.append(_safe_metrics(
@@ -716,6 +721,7 @@ async def get_training_results():
                 y_pred = _predict_svm_project_labels(svm_full_model, svm_full_vectorizer, X_test)
                 PREDICTION_CACHE[model_key] = y_pred
 
+            preds_custom["svm"] = y_pred
             save_confusion_matrix_chart(y_test, y_pred, "svm_full_custom")
 
             results.append(_safe_metrics(
@@ -744,6 +750,7 @@ async def get_training_results():
                 y_pred = _predict_svm_library_batch(X_test)
                 PREDICTION_CACHE[model_key] = y_pred
 
+            preds_library["svm"] = y_pred
             save_confusion_matrix_chart(y_test, y_pred, "svm_library")
 
             results.append(_safe_metrics(
@@ -770,6 +777,7 @@ async def get_training_results():
                 y_pred = _predict_mnb_library_batch(X_test)
                 PREDICTION_CACHE[model_key] = y_pred
 
+            preds_library["mnb"] = y_pred
             save_confusion_matrix_chart(y_test, y_pred, "mnb_library")
 
             results.append(_safe_metrics(
@@ -808,6 +816,7 @@ async def get_training_results():
                 y_pred = _predict_xgb_custom_batch(X_test)
                 PREDICTION_CACHE[model_key] = y_pred
 
+            preds_custom["xgb"] = y_pred
             save_confusion_matrix_chart(y_test, y_pred, "xgb_custom")
 
             results.append(_safe_metrics(
@@ -844,6 +853,7 @@ async def get_training_results():
                 y_pred = _predict_xgb_library_batch(X_test)
                 PREDICTION_CACHE[model_key] = y_pred
 
+            preds_library["xgb"] = y_pred
             save_confusion_matrix_chart(y_test, y_pred, "xgb_library")
 
             results.append(_safe_metrics(
@@ -857,6 +867,48 @@ async def get_training_results():
     except Exception as e:
         print(f"[train-models] Lỗi XGBoost Library: {e}")
         _append_placeholder(results, "XGBoost (Library - Lỗi tải mô hình)")
+
+    # 8. ENSEMBLE VOTING - NHÓM CUSTOM
+    if len(preds_custom["mnb"]) > 0 and len(preds_custom["svm"]) > 0 and len(preds_custom["xgb"]) > 0:
+        y_pred_custom_group = []
+        for i in range(len(y_test)):
+            votes = {
+                "mnb": preds_custom["mnb"][i],
+                "svm": preds_custom["svm"][i],
+                "xgb": preds_custom["xgb"][i]
+            }
+            y_pred_custom_group.append(_get_majority_vote(votes))
+
+        # Lưu Confusion Matrix cho nhóm Custom Ensemble
+        save_confusion_matrix_chart(y_test, y_pred_custom_group, "ensemble_custom")
+
+        results.append(_safe_metrics(
+            model_name="Nhóm Custom (Majority Vote)",
+            y_true=y_test,
+            y_pred=y_pred_custom_group,
+            training_time_sec=0.0  # Có thể cộng tổng thời gian 3 model nếu muốn
+        ))
+
+    # 9. ENSEMBLE VOTING - NHÓM LIBRARY
+    if len(preds_library["mnb"]) > 0 and len(preds_library["svm"]) > 0 and len(preds_library["xgb"]) > 0:
+        y_pred_library_group = []
+        for i in range(len(y_test)):
+            votes = {
+                "mnb": preds_library["mnb"][i],
+                "svm": preds_library["svm"][i],
+                "xgb": preds_library["xgb"][i]
+            }
+            y_pred_library_group.append(_get_majority_vote(votes))
+
+        # Lưu Confusion Matrix cho nhóm Library Ensemble
+        save_confusion_matrix_chart(y_test, y_pred_library_group, "ensemble_library")
+
+        results.append(_safe_metrics(
+            model_name="Nhóm Library (Majority Vote)",
+            y_true=y_test,
+            y_pred=y_pred_library_group,
+            training_time_sec=0.0
+        ))
 
     return {"status": "success", "data": make_json_safe(results)}
 
@@ -925,6 +977,31 @@ async def get_model_errors(model_name: str):
             else:
                 y_pred = _predict_xgb_library_batch(X_test)
                 PREDICTION_CACHE[model_key] = y_pred
+        elif "Majority Vote" in model_name:
+            is_library = "Library" in model_name
+
+            # Lấy kết quả dự đoán của 3 thuật toán (Ưu tiên lấy từ Cache cho nhanh)
+            if is_library:
+                mnb = PREDICTION_CACHE.get(
+                    "MNB_Library") if "MNB_Library" in PREDICTION_CACHE else _predict_mnb_library_batch(X_test)
+                svm = PREDICTION_CACHE.get(
+                    "SVM_Library") if "SVM_Library" in PREDICTION_CACHE else _predict_svm_library_batch(X_test)
+                xgb = PREDICTION_CACHE.get(
+                    "XGB_Library") if "XGB_Library" in PREDICTION_CACHE else _predict_xgb_library_batch(X_test)
+            else:
+                mnb = PREDICTION_CACHE.get(
+                    "MNB_Custom") if "MNB_Custom" in PREDICTION_CACHE else _predict_mnb_custom_batch(X_test)
+                svm = PREDICTION_CACHE.get(
+                    "SVM_FullSample_Custom") if "SVM_FullSample_Custom" in PREDICTION_CACHE else _predict_svm_full_custom_batch(
+                    X_test)
+                xgb = PREDICTION_CACHE.get(
+                    "XGB_Custom") if "XGB_Custom" in PREDICTION_CACHE else _predict_xgb_custom_batch(X_test)
+
+            # Gom phiếu bầu lại cho tập Test
+            if len(mnb) > 0 and len(svm) > 0 and len(xgb) > 0:
+                for i in range(len(X_test)):
+                    votes = {"mnb": mnb[i], "svm": svm[i], "xgb": xgb[i]}
+                    y_pred.append(_get_majority_vote(votes))
 
         else:
             return {
@@ -962,7 +1039,57 @@ async def get_model_prediction_details(
 ):
     actual_target = int(target) if target is not None else None
     predicted_target = int(predicted) if predicted is not None else None
+    # =========================
+    # XỬ LÝ CHI TIẾT CHO NHÓM ENSEMBLE (VOTING)
+    # =========================
+    if "Majority Vote" in model_name:
+        # 1. Tiền xử lý văn bản đầu vào
+        cleaned_text = clean_text(text)
 
+        # 2. Phân loại xem đang yêu cầu nhóm Library hay Custom
+        is_library = "Library" in model_name
+        votes_detail = []
+
+        try:
+            if is_library:
+                # Gọi dự đoán từ 3 thuật toán nhóm Library
+                mnb_p = _predict_mnb_library_batch([cleaned_text])[0]
+                svm_p = _predict_svm_library_batch([cleaned_text])[0]
+                xgb_p = _predict_xgb_library_batch([cleaned_text])[0]
+
+                votes_detail = [
+                    {"name": "Multinomial NB (Library)", "pred": mnb_p},
+                    {"name": "Linear SVM (Library)", "pred": svm_p},
+                    {"name": "XGBoost (Library)", "pred": xgb_p}
+                ]
+            else:
+                # Gọi dự đoán từ 3 thuật toán nhóm Custom
+                mnb_p = _predict_mnb_custom_batch([cleaned_text])[0]
+                # Ở đây mình dùng One-Sample Custom làm đại diện cho nhóm Custom
+                svm_p = _predict_svm_one_custom_batch([cleaned_text])[0]
+                xgb_p = _predict_xgb_custom_batch([cleaned_text])[0]
+
+                votes_detail = [
+                    {"name": "Multinomial NB (Custom)", "pred": mnb_p},
+                    {"name": "Linear SVM (Custom)", "pred": svm_p},
+                    {"name": "XGBoost (Custom)", "pred": xgb_p}
+                ]
+
+            return {
+                "status": "success",
+                "data": make_json_safe({
+                    "detail_type": "ensemble_voting",
+                    "model_name": model_name,
+                    "raw_text": text,
+                    "cleaned_text": cleaned_text,
+                    "actual_target": actual_target,
+                    "predicted_target": predicted_target,
+                    "votes": votes_detail
+                })
+            }
+        except Exception as e:
+            print(f"Lỗi khi lấy chi tiết Voting: {e}")
+            return {"status": "error", "message": "Không thể tính toán chi tiết phiếu bầu."}
     # =========================
     # MNB CUSTOM
     # =========================

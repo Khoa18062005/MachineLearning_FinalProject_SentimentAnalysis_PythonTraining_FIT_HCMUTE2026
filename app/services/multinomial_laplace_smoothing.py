@@ -36,7 +36,7 @@ def run_laplace_study():
     priors, _, vocab, totals, counts, _ = mnb.load_model(model_path)
 
     # Tạo giới hạn dãy laplace smoothing
-    alphas = np.linspace(0.01, 1, 30)
+    alphas = np.linspace(0, 1, 30)
     accuracies = []
     print('- Đang thực hiện đánh khởi tạo đánh giá')
 
