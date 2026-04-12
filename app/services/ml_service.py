@@ -182,9 +182,7 @@ def _replace_emoticons(text):
 
     return text
 
-
 def clean_text(text):
-    """Hàm tiền xử lý văn bản - bản nới lỏng hơn cho sentiment tweet"""
     # 0. Chuyển thành chữ thường
     text = str(text).lower().strip()
 
@@ -237,7 +235,6 @@ def clean_text(text):
     text = re.sub(r"\s+", " ", text).strip()
 
     return text
-
 
 def prepare_clean_datasets(limit=limit_max):
     """Hàm tạo 3 tập dữ liệu sạch và lưu vào biến toàn cục"""
