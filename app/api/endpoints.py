@@ -38,6 +38,13 @@ from app.models.XGBoost_Library import (
     load_vectorizer as load_xgb_library_vectorizer,
 )
 
+from app.models.hybrid_voting_ensemble import (
+    get_majority_vote,
+    get_group_vote_batch,
+    get_track_dual_vote_batch,
+    get_track_dual_vote_single
+)
+from app.services.ablation_service import AblationService
 router = APIRouter()
 PREDICTION_CACHE = {}
 
@@ -75,13 +82,6 @@ def make_json_safe(obj: Any):
         return [make_json_safe(v) for v in obj.tolist()]
 
     return obj
-
-
-def _get_majority_vote(preds_dict):
-    valid_preds = [int(v) for v in preds_dict.values() if int(v) != -1]
-    if not valid_preds:
-        return -1
-    return max(set(valid_preds), key=valid_preds.count)
 
 
 def _ensure_int_labels(y_pred):
@@ -322,7 +322,8 @@ def _get_vectorizer_feature_names(vectorizer):
     return []
 
 
-def _build_linear_svm_detail_payload(model_name, text, actual_target, predicted_target, model, vectorizer, source="custom"):
+def _build_linear_svm_detail_payload(model_name, text, actual_target, predicted_target, model, vectorizer,
+                                     source="custom"):
     """
     Giải thích tuyến tính cho:
     - SVM One-Sample Custom
@@ -585,7 +586,8 @@ def _build_xgb_generic_detail_payload(model_name, text, actual_target, predicted
         if hasattr(X_vec, "indices"):
             for idx, val in zip(X_vec.indices, X_vec.data):
                 feature_name = feature_names[idx] if idx < len(feature_names) else f"feature_{idx}"
-                importance = float(feature_importances[idx]) if feature_importances is not None and idx < len(feature_importances) else 0.0
+                importance = float(feature_importances[idx]) if feature_importances is not None and idx < len(
+                    feature_importances) else 0.0
                 proxy_contribution = float(val * importance)
 
                 rows.append({
@@ -876,13 +878,7 @@ async def get_training_results():
     # 8. ENSEMBLE VOTING - NHÓM CUSTOM
     y_pred_custom_group = []
     if len(preds_custom["mnb"]) > 0 and len(preds_custom["svm"]) > 0 and len(preds_custom["xgb"]) > 0:
-        for i in range(len(y_test)):
-            votes = {
-                "mnb": preds_custom["mnb"][i],
-                "svm": preds_custom["svm"][i],
-                "xgb": preds_custom["xgb"][i]
-            }
-            y_pred_custom_group.append(_get_majority_vote(votes))
+        y_pred_custom_group = get_group_vote_batch(preds_custom["mnb"], preds_custom["svm"], preds_custom["xgb"])
 
         save_confusion_matrix_chart(y_test, y_pred_custom_group, "ensemble_custom")
         results.append(_safe_metrics(
@@ -895,13 +891,8 @@ async def get_training_results():
     # 9. ENSEMBLE VOTING - NHÓM LIBRARY
     y_pred_library_group = []
     if len(preds_library["mnb"]) > 0 and len(preds_library["svm"]) > 0 and len(preds_library["xgb"]) > 0:
-        for i in range(len(y_test)):
-            votes = {
-                "mnb": preds_library["mnb"][i],
-                "svm": preds_library["svm"][i],
-                "xgb": preds_library["xgb"][i]
-            }
-            y_pred_library_group.append(_get_majority_vote(votes))
+        y_pred_library_group = get_group_vote_batch(preds_library["mnb"], preds_library["svm"],
+                                                    preds_library["xgb"])
 
         save_confusion_matrix_chart(y_test, y_pred_library_group, "ensemble_library")
         results.append(_safe_metrics(
@@ -913,16 +904,7 @@ async def get_training_results():
 
     # 10. TRACK-DUAL VALIDATION (KẾT HỢP CẢ 2 NHÓM)
     if len(y_pred_custom_group) > 0 and len(y_pred_library_group) > 0:
-        y_pred_dual_group = []
-        for i in range(len(y_test)):
-            cust_vote = y_pred_custom_group[i]
-            lib_vote = y_pred_library_group[i]
-
-            # Logic: Nếu giống thì chọn, khác thì ưu tiên Library
-            if cust_vote == lib_vote:
-                y_pred_dual_group.append(cust_vote)
-            else:
-                y_pred_dual_group.append(lib_vote)
+        y_pred_dual_group = get_track_dual_vote_batch(y_pred_custom_group, y_pred_library_group)
 
         save_confusion_matrix_chart(y_test, y_pred_dual_group, "ensemble_dual")
         results.append(_safe_metrics(
@@ -961,6 +943,8 @@ async def get_training_results():
         save_accuracy_comparison_chart(dual_list, "dual")
 
     return {"status": "success", "data": make_json_safe(results)}
+
+
 # =========================================================
 # MODEL ERRORS
 # =========================================================
@@ -1046,8 +1030,8 @@ async def get_model_errors(model_name: str):
                 if len(mnb_l) > 0 and len(svm_l) > 0 and len(xgb_l) > 0 and len(mnb_c) > 0 and len(svm_c) > 0 and len(
                         xgb_c) > 0:
                     for i in range(len(X_test)):
-                        lib_vote = _get_majority_vote({"mnb": mnb_l[i], "svm": svm_l[i], "xgb": xgb_l[i]})
-                        cust_vote = _get_majority_vote({"mnb": mnb_c[i], "svm": svm_c[i], "xgb": xgb_c[i]})
+                        lib_vote = get_majority_vote({"mnb": mnb_l[i], "svm": svm_l[i], "xgb": xgb_l[i]})
+                        cust_vote = get_majority_vote({"mnb": mnb_c[i], "svm": svm_c[i], "xgb": xgb_c[i]})
 
                         # Logic chốt hạ
                         if cust_vote == lib_vote:
@@ -1075,7 +1059,7 @@ async def get_model_errors(model_name: str):
                 if len(mnb) > 0 and len(svm) > 0 and len(xgb) > 0:
                     for i in range(len(X_test)):
                         votes = {"mnb": mnb[i], "svm": svm[i], "xgb": xgb[i]}
-                        y_pred.append(_get_majority_vote(votes))
+                        y_pred.append(get_majority_vote(votes))
 
         else:
             return {
@@ -1099,6 +1083,8 @@ async def get_model_errors(model_name: str):
             "status": "error",
             "message": f"Không thể lấy danh sách lỗi cho model '{model_name}'.",
         }
+
+
 # =========================================================
 # MODEL DETAILS
 # =========================================================
@@ -1130,13 +1116,13 @@ async def get_model_prediction_details(
                 mnb_l = _predict_mnb_library_batch([cleaned_text])[0]
                 svm_l = _predict_svm_library_batch([cleaned_text])[0]
                 xgb_l = _predict_xgb_library_batch([cleaned_text])[0]
-                lib_vote = _get_majority_vote({"mnb": mnb_l, "svm": svm_l, "xgb": xgb_l})
+                lib_vote = get_majority_vote({"mnb": mnb_l, "svm": svm_l, "xgb": xgb_l})
 
                 # Tính toán kết quả của nhóm Custom (3 thuật toán)
                 mnb_c = _predict_mnb_custom_batch([cleaned_text])[0]
                 svm_c = _predict_svm_one_custom_batch([cleaned_text])[0]
                 xgb_c = _predict_xgb_custom_batch([cleaned_text])[0]
-                cust_vote = _get_majority_vote({"mnb": mnb_c, "svm": svm_c, "xgb": xgb_c})
+                cust_vote = get_majority_vote({"mnb": mnb_c, "svm": svm_c, "xgb": xgb_c})
 
                 # Trả về 2 lá phiếu đại diện cho 2 nhóm
                 votes_detail = [
@@ -1316,6 +1302,8 @@ async def get_model_prediction_details(
             "message": f"Chưa hỗ trợ chi tiết cho model '{model_name}'."
         }
     }
+
+
 # =========================================================
 # CHARTS
 # =========================================================
@@ -1456,9 +1444,9 @@ async def predict_new_text(text: str):
     except Exception as e:
         print(f"Lỗi XGBoost Library: {e}")
 
-    custom_vote = _get_majority_vote(custom_preds)
-    lib_vote = _get_majority_vote(lib_preds)
-    final_vote = lib_vote if lib_vote != -1 else custom_vote
+    custom_vote = get_majority_vote(custom_preds)
+    lib_vote = get_majority_vote(lib_preds)
+    final_vote = get_track_dual_vote_single(custom_vote, lib_vote)
 
     return {
         "status": "success",
@@ -1473,4 +1461,50 @@ async def predict_new_text(text: str):
                 "final": final_vote,
             },
         }),
+    }
+
+
+@router.get("/run-ablation")
+async def run_ablation():
+    df_test, X_test, y_test = _get_test_data()
+    saved_files = []
+
+    # 1. Chuẩn bị dữ liệu dự đoán (Tự động lấy từ cache hoặc chạy mới)
+    def get_preds(key, func):
+        p = PREDICTION_CACHE.get(key)
+        if p is None:
+            p = func(X_test)
+            PREDICTION_CACHE[key] = p
+        return p
+
+    # Nhóm Custom
+    c_mnb = get_preds("MNB_Custom", _predict_mnb_custom_batch)
+    c_svm = get_preds("SVM_FullSample_Custom", _predict_svm_full_custom_batch)
+    c_xgb = get_preds("XGB_Custom", _predict_xgb_custom_batch)
+
+    # Nhóm Library
+    l_mnb = get_preds("MNB_Library", _predict_mnb_library_batch)
+    l_svm = get_preds("SVM_Library", _predict_svm_library_batch)
+    l_xgb = get_preds("XGB_Library", _predict_xgb_library_batch)
+
+    # 2. Vẽ ảnh cho Nhóm Custom
+    saved_files.append(AblationService.run_ablation_and_save_chart(
+        y_test, c_mnb, c_svm, c_xgb, "custom"
+    ))
+
+    # 3. Vẽ ảnh cho Nhóm Library
+    saved_files.append(AblationService.run_ablation_and_save_chart(
+        y_test, l_mnb, l_svm, l_xgb, "library"
+    ))
+
+    # 4. Vẽ ảnh cho Nhóm Dual (Sử dụng hàm mới dành riêng cho Dual)
+    saved_files.append(AblationService.run_dual_ablation_and_save_chart(
+        y_test,
+        custom_dict={"mnb": c_mnb, "svm": c_svm, "xgb": c_xgb},
+        library_dict={"mnb": l_mnb, "svm": l_svm, "xgb": l_xgb}
+    ))
+
+    return {
+        "status": "success",
+        "message": f"Đã cập nhật bộ 3 ảnh: {', '.join(saved_files)}"
     }
